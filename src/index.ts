@@ -56,7 +56,7 @@ async function main() {
     const action = await p.select({
       message: "What would you like to do?",
       options: [
-        { value: "create-user", label: "Create user" },
+        { value: "create-user", label: "Create user", hint: "will prompt to login" },
         { value: "whitelist-domain", label: "Whitelist domain(s)" },
         { value: "exit", label: "Exit" },
       ],

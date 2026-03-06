@@ -2,6 +2,9 @@ import * as p from "@clack/prompts";
 import type { PowerShellSession } from "../powershell.ts";
 import { generatePassword, validatePassword } from "../password.ts";
 import { friendlySkuName } from "../sku-names.ts";
+import { run as addToDistributionGroup } from "./add-to-distribution-group.ts";
+import { run as addToSecurityGroup } from "./add-to-security-group.ts";
+import { run as addToSharedMailbox } from "./add-to-shared-mailbox.ts";
 
 interface AcceptedDomain {
   DomainName: string;
@@ -46,22 +49,10 @@ export async function run(ps: PowerShellSession): Promise<void> {
   });
   if (p.isCancel(displayName)) return;
 
-  // 3. Username
-  const username = await p.text({
-    message: "Username (before @)",
-    initialValue: suggestUsername(displayName),
-    validate: (v = "") => {
-      if (!v.trim()) return "Username is required";
-      if (/[^a-zA-Z0-9._-]/.test(v)) return "Invalid characters in username";
-    },
-  });
-  if (p.isCancel(username)) return;
-
-  // 4. Domain selection
+  // 3–4. Username + domain selection (with UPN availability check)
+  let domains: AcceptedDomain[];
   const domainSpin = p.spinner();
   domainSpin.start("Fetching accepted domains...");
-
-  let domains: AcceptedDomain[];
   try {
     const raw = await ps.runCommandJson<AcceptedDomain | AcceptedDomain[]>(
       "Get-AcceptedDomain | Select-Object DomainName, Default",
@@ -75,19 +66,47 @@ export async function run(ps: PowerShellSession): Promise<void> {
   }
 
   const defaultDomain = domains.find((d) => d.Default)?.DomainName ?? domains[0]?.DomainName;
+  let upn: string;
+  let lastUsername = suggestUsername(displayName);
 
-  const domain = await p.select({
-    message: "Domain",
-    options: domains.map((d) => ({
-      value: d.DomainName,
-      label: d.DomainName,
-      hint: d.Default ? "default" : undefined,
-    })),
-    initialValue: defaultDomain,
-  });
-  if (p.isCancel(domain)) return;
+  upnLoop: while (true) {
+    const username = await p.text({
+      message: "Username (before @)",
+      initialValue: lastUsername,
+      validate: (v = "") => {
+        if (!v.trim()) return "Username is required";
+        if (/[^a-zA-Z0-9._-]/.test(v)) return "Invalid characters in username";
+      },
+    });
+    if (p.isCancel(username)) return;
+    lastUsername = username;
 
-  const upn = `${username}@${domain}`;
+    const domain = await p.select({
+      message: "Domain",
+      options: domains.map((d) => ({
+        value: d.DomainName,
+        label: d.DomainName,
+        hint: d.Default ? "default" : undefined,
+      })),
+      initialValue: defaultDomain,
+    });
+    if (p.isCancel(domain)) return;
+
+    upn = `${username}@${domain}`;
+
+    const checkSpin = p.spinner();
+    checkSpin.start(`Checking if ${upn} is available...`);
+    const { output } = await ps.runCommand(
+      `Get-MgUser -Filter "userPrincipalName eq '${escapePS(upn)}'" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id`,
+    );
+    if (output.trim()) {
+      checkSpin.stop(`${upn} is already taken.`);
+      p.log.warn("Please choose a different username.");
+      continue upnLoop;
+    }
+    checkSpin.stop(`${upn} is available.`);
+    break;
+  }
 
   // 5. License selection
   let selectedSkus: SubscribedSku[] = [];
@@ -127,6 +146,18 @@ export async function run(ps: PowerShellSession): Promise<void> {
         required: false,
       });
       if (p.isCancel(choices)) return;
+
+      if (choices.length === 0) {
+        const confirm = await p.select({
+          message: "No licenses selected. Create user without a license?",
+          options: [
+            { value: "back", label: "Go back to licenses" },
+            { value: "none", label: "Yes, continue without license" },
+          ],
+        });
+        if (p.isCancel(confirm)) return;
+        if (confirm === "back") continue licenseLoop;
+      }
 
       selectedSkus = skus.filter((s) => choices.includes(s.SkuId));
       break;
@@ -205,7 +236,7 @@ export async function run(ps: PowerShellSession): Promise<void> {
     "New-MgUser -BodyParameter @{",
     `  DisplayName = '${escapePS(displayName)}'`,
     `  UserPrincipalName = '${escapePS(upn)}'`,
-    `  MailNickname = '${escapePS(username)}'`,
+    `  MailNickname = '${escapePS(upn.split("@")[0]!)}'`,
     "  AccountEnabled = $true",
     "  UsageLocation = 'US'",
     "  PasswordProfile = @{",
@@ -250,4 +281,54 @@ export async function run(ps: PowerShellSession): Promise<void> {
   );
 
   p.log.success("User created successfully.");
+
+  // 12. Post-creation membership setup
+  const addedDistGroups: string[] = [];
+  const addedSecGroups: string[] = [];
+  const addedMailboxes: string[] = [];
+
+  while (true) {
+    const action = await p.select({
+      message: "Add user to...",
+      options: [
+        { value: "distribution-group", label: "Distribution group" },
+        { value: "security-group", label: "Security group" },
+        { value: "shared-mailbox", label: "Shared mailbox" },
+        { value: "done", label: "Done" },
+      ],
+    });
+    if (p.isCancel(action) || action === "done") break;
+
+    switch (action) {
+      case "distribution-group": {
+        const names = await addToDistributionGroup(ps, upn);
+        addedDistGroups.push(...names);
+        break;
+      }
+      case "security-group": {
+        const name = await addToSecurityGroup(ps, upn);
+        if (name) addedSecGroups.push(name);
+        break;
+      }
+      case "shared-mailbox": {
+        const names = await addToSharedMailbox(ps, upn);
+        addedMailboxes.push(...names);
+        break;
+      }
+    }
+  }
+
+  // 13. Summary
+  const parts = [`Created user ${upn}`];
+  if (addedDistGroups.length > 0) {
+    parts.push(`Distribution group(s): ${addedDistGroups.join(", ")}`);
+  }
+  if (addedSecGroups.length > 0) {
+    parts.push(`Security group(s): ${addedSecGroups.join(", ")}`);
+  }
+  if (addedMailboxes.length > 0) {
+    parts.push(`Shared mailbox(es): ${addedMailboxes.join(", ")}`);
+  }
+
+  p.note(parts.join("\n"), "Summary");
 }
