@@ -25,10 +25,43 @@ export async function run(ps: PowerShellSession): Promise<void> {
 
   const domains = input.split(",").map((d) => d.trim()).filter(Boolean);
 
-  p.note(domains.map((d) => `  ${d}`).join("\n"), "Domains to whitelist");
+  // Fetch current allowed sender domains to skip duplicates
+  const spin = p.spinner();
+  spin.start("Checking existing safe sender list...");
+
+  let existingDomains = new Set<string>();
+  const { output: existingList, error: fetchError } = await ps.runCommand(
+    '(Get-HostedContentFilterPolicy -Identity "Default").AllowedSenderDomains | ForEach-Object { $_.Domain }'
+  );
+
+  if (fetchError) {
+    spin.stop("Could not fetch existing list — will attempt to add all domains.");
+    p.log.warn(fetchError);
+  } else {
+    spin.stop("Checked existing safe sender list.");
+    existingDomains = new Set(
+      (existingList || "").split("\n").map((l) => l.trim().toLowerCase()).filter(Boolean)
+    );
+  }
+
+  const alreadyPresent = domains.filter((d) => existingDomains.has(d.toLowerCase()));
+  const toAdd = domains.filter((d) => !existingDomains.has(d.toLowerCase()));
+
+  if (toAdd.length === 0) {
+    for (const d of alreadyPresent) {
+      p.log.info(`${d} is already in safe sender list`);
+    }
+    return;
+  }
+
+  for (const d of alreadyPresent) {
+    p.log.info(`${d} is already in safe sender list`);
+  }
+
+  p.note(toAdd.map((d) => `  ${d}`).join("\n"), "Domains to whitelist");
 
   const confirm = await p.confirm({
-    message: `Add ${domains.length} domain(s) to the safe sender list?`,
+    message: `Add ${toAdd.length} domain(s) to the safe sender list?`,
   });
 
   if (p.isCancel(confirm) || !confirm) {
@@ -36,14 +69,12 @@ export async function run(ps: PowerShellSession): Promise<void> {
     return;
   }
 
-  const spin = p.spinner();
-
   // Add each domain
   spin.start("Adding domain(s) to safe sender list...");
 
   const results: { domain: string; success: boolean; error?: string }[] = [];
 
-  for (const domain of domains) {
+  for (const domain of toAdd) {
     const { error } = await ps.runCommand(
       `Set-HostedContentFilterPolicy -Identity 'Default' -AllowedSenderDomains @{Add='${escapePS(domain)}'}`
     );
