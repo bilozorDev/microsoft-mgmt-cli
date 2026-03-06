@@ -62,7 +62,7 @@ async function main() {
       options: [
         { value: "create-user", label: "Create user", hint: "will prompt to login" },
         { value: "whitelist-domain", label: "Whitelist domain(s)" },
-        { value: "delete-user", label: "Delete user" },
+        { value: "delete-user", label: "Delete user", hint: "will prompt to login" },
         { value: "exit", label: "Exit" },
       ],
     });

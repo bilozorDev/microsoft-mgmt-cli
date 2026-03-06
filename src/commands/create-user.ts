@@ -299,7 +299,32 @@ export async function run(ps: PowerShellSession): Promise<void> {
 
   p.log.success("User created successfully.");
 
-  // 12. Post-creation membership setup
+  // 12. Wait for Exchange Online to recognize the new user
+  {
+    const waitSpin = p.spinner();
+    waitSpin.start("Waiting for Exchange Online to provision user...");
+    let exchangeReady = false;
+    for (let i = 0; i < 30; i++) {
+      const { output } = await ps.runCommand(
+        `Get-Recipient -Identity '${escapePS(upn)}' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty PrimarySmtpAddress`,
+      );
+      if (output.trim()) {
+        exchangeReady = true;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 10_000));
+    }
+    if (exchangeReady) {
+      waitSpin.stop("User is visible in Exchange Online.");
+    } else {
+      waitSpin.stop("User not yet visible in Exchange Online.");
+      p.log.warn(
+        "Exchange provisioning is still in progress. Shared mailbox operations may fail — try again from the main menu later.",
+      );
+    }
+  }
+
+  // 13. Post-creation membership setup
   const addedDistGroups: string[] = [];
   const addedSecGroups: string[] = [];
   const addedMailboxes: string[] = [];
@@ -335,7 +360,7 @@ export async function run(ps: PowerShellSession): Promise<void> {
     }
   }
 
-  // 13. Summary
+  // 14. Summary
   const parts = [`Created user ${upn}`];
   if (addedDistGroups.length > 0) {
     parts.push(`Distribution group(s): ${addedDistGroups.join(", ")}`);

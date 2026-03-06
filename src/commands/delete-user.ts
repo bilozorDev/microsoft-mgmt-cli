@@ -35,6 +35,17 @@ interface SecGroupMembership {
   MemberCount: number;
 }
 
+function elapsedTimer(spin: { message(msg?: string): void }, baseMsg: string): () => void {
+  const start = Date.now();
+  const interval = setInterval(() => {
+    const secs = Math.floor((Date.now() - start) / 1000);
+    const mins = Math.floor(secs / 60);
+    const elapsed = mins > 0 ? `${mins}m ${secs % 60}s` : `${secs}s`;
+    spin.message(`${baseMsg} (${elapsed})`);
+  }, 1000);
+  return () => clearInterval(interval);
+}
+
 function formatStorageSize(mb: number): string {
   if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`;
   return `${mb} MB`;
@@ -153,7 +164,9 @@ export async function run(ps: PowerShellSession): Promise<void> {
     return;
   }
 
-  // Step 1: Select user to delete
+  // ── GATHER PHASE ──────────────────────────────────────────────────────
+
+  // 1. Select user
   const user = await selectUser(ps, "Select user to delete");
   if (!user) return;
 
@@ -172,73 +185,37 @@ export async function run(ps: PowerShellSession): Promise<void> {
     licSpin.stop("User details loaded.");
   } catch {
     licSpin.stop("User details loaded.");
-    // No licenses or error — continue
   }
-
-  const licenseLines =
-    licenses.length > 0
-      ? licenses.map((l) => `  - ${friendlySkuName(l.SkuPartNumber)}`).join("\n")
-      : "  (none)";
 
   p.note(
     [
       `Name:     ${user.DisplayName}`,
       `UPN:      ${upn}`,
-      `ID:       ${userId}`,
-      `Licenses:\n${licenseLines}`,
+      `Licenses: ${licenses.length > 0 ? licenses.map((l) => friendlySkuName(l.SkuPartNumber)).join(", ") : "(none)"}`,
     ].join("\n"),
     "User to delete",
   );
 
-  const proceed = await p.confirm({ message: "Proceed with deleting this user?" });
-  if (p.isCancel(proceed) || !proceed) {
-    p.log.info("Cancelled.");
-    return;
-  }
-
-  // Tracking arrays for summary
-  const releasedLicenses = licenses.map((l) => friendlySkuName(l.SkuPartNumber));
-  let convertedToShared = false;
-  let mailboxDelegateNames: string[] = [];
-  let oneDriveDelegateNames: string[] = [];
-  let oneDriveSize: string | null = null;
-  const removedMailboxes: string[] = [];
-  const removedDistGroups: string[] = [];
-  const removedSecGroups: string[] = [];
-  const orphans: { type: string; name: string }[] = [];
-
-  // Step 2: Convert to shared mailbox (optional)
+  // 2. Check mailbox & ask about conversion
   const mbSpin = p.spinner();
   mbSpin.start("Checking mailbox...");
-  let hasExchangeMailbox = false;
-
   const { output: mbOutput } = await ps.runCommand(
     `Get-Mailbox -Identity '${escapePS(upn)}' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty RecipientTypeDetails`,
   );
   const mbType = mbOutput.trim();
   mbSpin.stop(mbType ? `Mailbox type: ${mbType}` : "No Exchange mailbox found.");
 
-  if (mbType === "UserMailbox") {
-    hasExchangeMailbox = true;
+  let willConvertToShared = false;
+  let mailboxDelegates: MgUser[] = [];
 
+  if (mbType === "UserMailbox") {
     const convert = await p.confirm({
       message: "Convert mailbox to shared before deletion?",
     });
     if (p.isCancel(convert)) return;
 
     if (convert) {
-      const convertSpin = p.spinner();
-      convertSpin.start("Converting to shared mailbox...");
-      const { error } = await ps.runCommand(
-        `Set-Mailbox -Identity '${escapePS(upn)}' -Type Shared`,
-      );
-      if (error) {
-        convertSpin.stop("Failed to convert mailbox.");
-        p.log.error(error);
-      } else {
-        convertSpin.stop("Mailbox converted to shared.");
-        convertedToShared = true;
-      }
+      willConvertToShared = true;
 
       const grantAccess = await p.confirm({
         message: "Grant other users access to this shared mailbox?",
@@ -246,47 +223,22 @@ export async function run(ps: PowerShellSession): Promise<void> {
       if (p.isCancel(grantAccess)) return;
 
       if (grantAccess) {
-        const delegates = await selectMultipleUsers(
+        mailboxDelegates = await selectMultipleUsers(
           ps,
           "Select delegate(s) for mailbox access",
           upn,
         );
-
-        for (const delegate of delegates) {
-          const dSpin = p.spinner();
-          dSpin.start(`Granting access to ${delegate.DisplayName}...`);
-          const errors: string[] = [];
-
-          const { error: faErr } = await ps.runCommand(
-            `Add-MailboxPermission -Identity '${escapePS(upn)}' -User '${escapePS(delegate.UserPrincipalName)}' -AccessRights FullAccess -InheritanceType All -AutoMapping $true`,
-          );
-          if (faErr) errors.push(`FullAccess: ${faErr}`);
-
-          const { error: saErr } = await ps.runCommand(
-            `Add-RecipientPermission -Identity '${escapePS(upn)}' -Trustee '${escapePS(delegate.UserPrincipalName)}' -AccessRights SendAs -Confirm:$false`,
-          );
-          if (saErr) errors.push(`SendAs: ${saErr}`);
-
-          if (errors.length === 0) {
-            dSpin.stop(`Granted access to ${delegate.DisplayName}.`);
-            mailboxDelegateNames.push(delegate.DisplayName);
-          } else if (errors.length === 1) {
-            dSpin.stop(`Partially granted access to ${delegate.DisplayName}.`);
-            mailboxDelegateNames.push(delegate.DisplayName);
-            for (const err of errors) p.log.error(err);
-          } else {
-            dSpin.stop(`Failed to grant access to ${delegate.DisplayName}.`);
-            for (const err of errors) p.log.error(err);
-          }
-        }
       }
     }
   } else if (mbType === "SharedMailbox") {
-    hasExchangeMailbox = true;
     p.log.info("Mailbox is already shared — skipping conversion.");
   }
 
-  // Step 2b: Share OneDrive (optional)
+  // 3. Ask about OneDrive
+  let oneDriveUrl: string | null = null;
+  let oneDriveSize: string | null = null;
+  let oneDriveDelegates: MgUser[] = [];
+
   const shareDrive = await p.confirm({
     message: "Grant another user access to this user's OneDrive?",
   });
@@ -307,13 +259,12 @@ export async function run(ps: PowerShellSession): Promise<void> {
     }
 
     if (spoConnected) {
-      // Construct OneDrive URL
       const { output: tenantDomain } = await ps.runCommand(
         "Get-AcceptedDomain | Where-Object { $_.DomainName -like '*.onmicrosoft.com' -and $_.DomainName -notlike '*.mail.onmicrosoft.com' } | Select-Object -ExpandProperty DomainName",
       );
       const tenantName = tenantDomain.trim().replace(".onmicrosoft.com", "");
       const personalPath = upn.replace(/[^a-zA-Z0-9]/g, "_");
-      const oneDriveUrl = `https://${tenantName}-my.sharepoint.com/personal/${personalPath}`;
+      oneDriveUrl = `https://${tenantName}-my.sharepoint.com/personal/${personalPath}`;
 
       const sizeSpin = p.spinner();
       sizeSpin.start("Checking OneDrive size...");
@@ -324,48 +275,155 @@ export async function run(ps: PowerShellSession): Promise<void> {
       if (sizeError) {
         sizeSpin.stop("OneDrive not found or not provisioned.");
         p.log.info("Skipping OneDrive sharing.");
+        oneDriveUrl = null;
       } else {
         const sizeMB = parseInt(sizeOutput.trim(), 10);
-        const sizeFormatted = isNaN(sizeMB) ? "unknown size" : formatStorageSize(sizeMB);
-        oneDriveSize = sizeFormatted;
-        sizeSpin.stop(`OneDrive is using ${sizeFormatted}.`);
+        oneDriveSize = isNaN(sizeMB) ? "unknown size" : formatStorageSize(sizeMB);
+        sizeSpin.stop(`OneDrive is using ${oneDriveSize}.`);
 
-        const delegates = await selectMultipleUsers(
+        oneDriveDelegates = await selectMultipleUsers(
           ps,
           "Select delegate(s) for OneDrive access",
           upn,
         );
-
-        for (const delegate of delegates) {
-          const dSpin = p.spinner();
-          dSpin.start(`Granting OneDrive access to ${delegate.DisplayName}...`);
-          const { error } = await ps.runCommand(
-            `Set-SPOUser -Site '${escapePS(oneDriveUrl)}' -LoginName '${escapePS(delegate.UserPrincipalName)}' -IsSiteCollectionAdmin $true`,
-          );
-          if (error) {
-            dSpin.stop(`Failed to grant OneDrive access to ${delegate.DisplayName}.`);
-            p.log.error(error);
-          } else {
-            dSpin.stop(`Granted OneDrive access to ${delegate.DisplayName}.`);
-            oneDriveDelegateNames.push(delegate.DisplayName);
-          }
-        }
       }
     }
   }
 
-  // Step 3: Scan phase
-  let sharedMailboxPerms: SharedMailboxPerm[] = [];
-  let distGroupMemberships: DistGroupMembership[] = [];
-  let secGroupMemberships: SecGroupMembership[] = [];
+  // ── CONFIRMATION ──────────────────────────────────────────────────────
 
-  // 3a. Shared mailbox permissions
-  if (hasExchangeMailbox) {
-    const scanMbSpin = p.spinner();
-    scanMbSpin.start("Scanning shared mailbox permissions...");
-    try {
-      const raw = await ps.runCommandJson<SharedMailboxPerm | SharedMailboxPerm[]>(
-        `$targetUpn = '${escapePS(upn)}'
+  const planLines: string[] = [
+    `Delete user: ${user.DisplayName} (${upn})`,
+  ];
+
+  if (licenses.length > 0) {
+    planLines.push(
+      `\nLicenses to release:\n${licenses.map((l) => `  - ${friendlySkuName(l.SkuPartNumber)}`).join("\n")}`,
+    );
+  }
+
+  if (willConvertToShared) {
+    planLines.push("\nMailbox: Convert to shared");
+    if (mailboxDelegates.length > 0) {
+      planLines.push(
+        `Mailbox delegates: ${mailboxDelegates.map((d) => d.DisplayName).join(", ")}`,
+      );
+    }
+  }
+
+  if (oneDriveUrl && oneDriveDelegates.length > 0) {
+    const sizeLabel = oneDriveSize ? ` (${oneDriveSize})` : "";
+    planLines.push(`\nOneDrive${sizeLabel}: Grant access`);
+    planLines.push(
+      `OneDrive delegates: ${oneDriveDelegates.map((d) => d.DisplayName).join(", ")}`,
+    );
+  }
+
+  if (willConvertToShared) {
+    planLines.push("\nWill scan & clean up memberships (shared mailboxes, distribution groups, security groups)");
+  }
+
+  p.note(planLines.join("\n"), "Planned actions");
+
+  const confirm = await p.confirm({ message: "Proceed with deletion?" });
+  if (p.isCancel(confirm) || !confirm) {
+    p.log.info("Cancelled.");
+    return;
+  }
+
+  // ── EXECUTE PHASE ─────────────────────────────────────────────────────
+
+  const releasedLicenses = licenses.map((l) => friendlySkuName(l.SkuPartNumber));
+  let convertedToShared = false;
+  const mailboxDelegateNames: string[] = [];
+  const oneDriveDelegateNames: string[] = [];
+  const removedMailboxes: string[] = [];
+  const removedDistGroups: string[] = [];
+  const removedSecGroups: string[] = [];
+  const orphans: { type: string; name: string }[] = [];
+
+  // Execute: Convert mailbox
+  if (willConvertToShared) {
+    const convertSpin = p.spinner();
+    convertSpin.start("Converting to shared mailbox...");
+    const { error } = await ps.runCommand(
+      `Set-Mailbox -Identity '${escapePS(upn)}' -Type Shared`,
+    );
+    if (error) {
+      convertSpin.stop("Failed to convert mailbox.");
+      p.log.error(error);
+      p.log.error("Cannot proceed — mailbox must be converted before deletion.");
+      return;
+    }
+    convertSpin.stop("Mailbox converted to shared.");
+    convertedToShared = true;
+  }
+
+  // Grant mailbox delegates (only if conversion succeeded)
+  if (convertedToShared) {
+    for (const delegate of mailboxDelegates) {
+      const dSpin = p.spinner();
+      dSpin.start(`Granting mailbox access to ${delegate.DisplayName}...`);
+      const errors: string[] = [];
+
+      const { error: faErr } = await ps.runCommand(
+        `Add-MailboxPermission -Identity '${escapePS(upn)}' -User '${escapePS(delegate.UserPrincipalName)}' -AccessRights FullAccess -InheritanceType All -AutoMapping $true`,
+      );
+      if (faErr) errors.push(`FullAccess: ${faErr}`);
+
+      const { error: saErr } = await ps.runCommand(
+        `Add-RecipientPermission -Identity '${escapePS(upn)}' -Trustee '${escapePS(delegate.UserPrincipalName)}' -AccessRights SendAs -Confirm:$false`,
+      );
+      if (saErr) errors.push(`SendAs: ${saErr}`);
+
+      if (errors.length === 0) {
+        dSpin.stop(`Granted access to ${delegate.DisplayName}.`);
+        mailboxDelegateNames.push(delegate.DisplayName);
+      } else if (errors.length < 2) {
+        dSpin.stop(`Partially granted access to ${delegate.DisplayName}.`);
+        mailboxDelegateNames.push(delegate.DisplayName);
+        for (const err of errors) p.log.error(err);
+      } else {
+        dSpin.stop(`Failed to grant access to ${delegate.DisplayName}.`);
+        for (const err of errors) p.log.error(err);
+      }
+    }
+  }
+
+  // Execute: Grant OneDrive access
+  if (oneDriveUrl && oneDriveDelegates.length > 0) {
+    for (const delegate of oneDriveDelegates) {
+      const dSpin = p.spinner();
+      dSpin.start(`Granting OneDrive access to ${delegate.DisplayName}...`);
+      const { error } = await ps.runCommand(
+        `Set-SPOUser -Site '${escapePS(oneDriveUrl)}' -LoginName '${escapePS(delegate.UserPrincipalName)}' -IsSiteCollectionAdmin $true`,
+      );
+      if (error) {
+        dSpin.stop(`Failed to grant OneDrive access to ${delegate.DisplayName}.`);
+        p.log.error(error);
+      } else {
+        dSpin.stop(`Granted OneDrive access to ${delegate.DisplayName}.`);
+        oneDriveDelegateNames.push(delegate.DisplayName);
+      }
+    }
+  }
+
+  // Execute: Scan & clean up memberships (only when mailbox is preserved as shared)
+  if (convertedToShared) {
+    p.log.info("Scanning memberships to clean up — this can take a few minutes.");
+
+    let sharedMailboxPerms: SharedMailboxPerm[] = [];
+    let distGroupMemberships: DistGroupMembership[] = [];
+    let secGroupMemberships: SecGroupMembership[] = [];
+
+    // Scan shared mailbox permissions
+    {
+      const scanMbSpin = p.spinner();
+      scanMbSpin.start("Scanning shared mailbox permissions...");
+      const stopTimer = elapsedTimer(scanMbSpin, "Scanning shared mailbox permissions");
+      try {
+        const raw = await ps.runCommandJson<SharedMailboxPerm | SharedMailboxPerm[]>(
+          `$targetUpn = '${escapePS(upn)}'
 Get-Mailbox -RecipientTypeDetails SharedMailbox -ResultSize Unlimited | ForEach-Object {
   $mb = $_
   $fa = $null; $sa = $null; $sob = $false
@@ -384,23 +442,26 @@ Get-Mailbox -RecipientTypeDetails SharedMailbox -ResultSize Unlimited | ForEach-
     }
   }
 }`,
-      );
-      sharedMailboxPerms = raw ? (Array.isArray(raw) ? raw : [raw]) : [];
-      scanMbSpin.stop(
-        `Found permissions on ${sharedMailboxPerms.length} shared mailbox(es).`,
-      );
-    } catch {
-      scanMbSpin.stop("No shared mailbox permissions found.");
+        );
+        stopTimer();
+        sharedMailboxPerms = raw ? (Array.isArray(raw) ? raw : [raw]) : [];
+        scanMbSpin.stop(
+          `Found permissions on ${sharedMailboxPerms.length} shared mailbox(es).`,
+        );
+      } catch {
+        stopTimer();
+        scanMbSpin.stop("No shared mailbox permissions found.");
+      }
     }
-  }
 
-  // 3b. Distribution group memberships
-  {
-    const scanDgSpin = p.spinner();
-    scanDgSpin.start("Scanning distribution group memberships...");
-    try {
-      const raw = await ps.runCommandJson<DistGroupMembership | DistGroupMembership[]>(
-        `Get-DistributionGroup -ResultSize Unlimited | ForEach-Object {
+    // Scan distribution group memberships
+    {
+      const scanDgSpin = p.spinner();
+      scanDgSpin.start("Scanning distribution group memberships...");
+      const stopTimer = elapsedTimer(scanDgSpin, "Scanning distribution group memberships");
+      try {
+        const raw = await ps.runCommandJson<DistGroupMembership | DistGroupMembership[]>(
+          `Get-DistributionGroup -ResultSize Unlimited | ForEach-Object {
   $members = Get-DistributionGroupMember -Identity $_.PrimarySmtpAddress -ResultSize Unlimited
   if ($members.PrimarySmtpAddress -contains '${escapePS(upn)}') {
     [PSCustomObject]@{
@@ -410,156 +471,138 @@ Get-Mailbox -RecipientTypeDetails SharedMailbox -ResultSize Unlimited | ForEach-
     }
   }
 }`,
-      );
-      distGroupMemberships = raw ? (Array.isArray(raw) ? raw : [raw]) : [];
-      scanDgSpin.stop(
-        `Found ${distGroupMemberships.length} distribution group membership(s).`,
-      );
-    } catch {
-      scanDgSpin.stop("No distribution group memberships found.");
+        );
+        stopTimer();
+        distGroupMemberships = raw ? (Array.isArray(raw) ? raw : [raw]) : [];
+        scanDgSpin.stop(
+          `Found ${distGroupMemberships.length} distribution group membership(s).`,
+        );
+      } catch {
+        stopTimer();
+        scanDgSpin.stop("No distribution group memberships found.");
+      }
     }
-  }
 
-  // 3c. Security group memberships
-  {
-    const scanSgSpin = p.spinner();
-    scanSgSpin.start("Scanning security group memberships...");
-    try {
-      const raw = await ps.runCommandJson<SecGroupMembership | SecGroupMembership[]>(
-        `Get-MgUserMemberOf -UserId '${escapePS(userId)}' -All | ForEach-Object {
+    // Scan security group memberships
+    {
+      const scanSgSpin = p.spinner();
+      scanSgSpin.start("Scanning security group memberships...");
+      const stopTimer = elapsedTimer(scanSgSpin, "Scanning security group memberships");
+      try {
+        const raw = await ps.runCommandJson<SecGroupMembership | SecGroupMembership[]>(
+          `Get-MgUserMemberOf -UserId '${escapePS(userId)}' -All | ForEach-Object {
   $grp = Get-MgGroup -GroupId $_.Id -ErrorAction SilentlyContinue
   if ($grp -and $grp.SecurityEnabled) {
     $count = (Get-MgGroupMember -GroupId $grp.Id -All).Count
     [PSCustomObject]@{ DisplayName = $grp.DisplayName; Id = $grp.Id; MemberCount = $count }
   }
 }`,
-      );
-      secGroupMemberships = raw ? (Array.isArray(raw) ? raw : [raw]) : [];
-      scanSgSpin.stop(
-        `Found ${secGroupMemberships.length} security group membership(s).`,
-      );
-    } catch {
-      scanSgSpin.stop("No security group memberships found.");
+        );
+        stopTimer();
+        secGroupMemberships = raw ? (Array.isArray(raw) ? raw : [raw]) : [];
+        scanSgSpin.stop(
+          `Found ${secGroupMemberships.length} security group membership(s).`,
+        );
+      } catch {
+        stopTimer();
+        scanSgSpin.stop("No security group memberships found.");
+      }
     }
-  }
 
-  // Step 4: Display findings & orphan warnings
-  const totalFindings =
-    sharedMailboxPerms.length +
-    distGroupMemberships.length +
-    secGroupMemberships.length;
-
-  if (totalFindings > 0) {
-    const lines: string[] = [];
-    if (sharedMailboxPerms.length > 0)
-      lines.push(
-        `Shared mailbox permissions: ${sharedMailboxPerms.length}`,
-      );
-    if (distGroupMemberships.length > 0)
-      lines.push(
-        `Distribution group memberships: ${distGroupMemberships.length}`,
-      );
-    if (secGroupMemberships.length > 0)
-      lines.push(
-        `Security group memberships: ${secGroupMemberships.length}`,
-      );
-    p.note(lines.join("\n"), "Memberships to remove");
-  }
-
-  // Detect orphans
-  for (const mb of sharedMailboxPerms) {
-    if (mb.HasFullAccess && mb.OtherFullAccessCount === 0) {
-      orphans.push({ type: "Shared mailbox", name: mb.DisplayName });
-    }
-  }
-  for (const dg of distGroupMemberships) {
-    if (dg.MemberCount === 1) {
-      orphans.push({ type: "Distribution group", name: dg.DisplayName });
-    }
-  }
-  for (const sg of secGroupMemberships) {
-    if (sg.MemberCount === 1) {
-      orphans.push({ type: "Security group", name: sg.DisplayName });
-    }
-  }
-
-  if (orphans.length > 0) {
-    p.log.warn(
-      `Orphaned resources (will have no remaining members):\n${orphans.map((o) => `  - [${o.type}] ${o.name}`).join("\n")}`,
-    );
-  }
-
-  // Step 5: Removal phase
-  // Remove shared mailbox permissions
-  if (sharedMailboxPerms.length > 0) {
-    const rmMbSpin = p.spinner();
-    rmMbSpin.start("Removing shared mailbox permissions...");
+    // Detect orphans
     for (const mb of sharedMailboxPerms) {
-      const errors: string[] = [];
-
-      if (mb.HasFullAccess) {
-        const { error } = await ps.runCommand(
-          `Remove-MailboxPermission -Identity '${escapePS(mb.PrimarySmtpAddress)}' -User '${escapePS(upn)}' -AccessRights FullAccess -Confirm:$false`,
-        );
-        if (error) errors.push(`FullAccess: ${error}`);
+      if (mb.HasFullAccess && mb.OtherFullAccessCount === 0) {
+        orphans.push({ type: "Shared mailbox", name: mb.DisplayName });
       }
-      if (mb.HasSendAs) {
-        const { error } = await ps.runCommand(
-          `Remove-RecipientPermission -Identity '${escapePS(mb.PrimarySmtpAddress)}' -Trustee '${escapePS(upn)}' -AccessRights SendAs -Confirm:$false`,
-        );
-        if (error) errors.push(`SendAs: ${error}`);
-      }
-      if (mb.HasSendOnBehalf) {
-        const { error } = await ps.runCommand(
-          `Set-Mailbox -Identity '${escapePS(mb.PrimarySmtpAddress)}' -GrantSendOnBehalfTo @{Remove='${escapePS(upn)}'}`,
-        );
-        if (error) errors.push(`SendOnBehalf: ${error}`);
-      }
-
-      if (errors.length > 0) {
-        for (const err of errors) p.log.error(`${mb.DisplayName}: ${err}`);
-      }
-      removedMailboxes.push(mb.DisplayName);
     }
-    rmMbSpin.stop(`Removed permissions from ${removedMailboxes.length} shared mailbox(es).`);
-  }
-
-  // Remove distribution group memberships
-  if (distGroupMemberships.length > 0) {
-    const rmDgSpin = p.spinner();
-    rmDgSpin.start("Removing distribution group memberships...");
     for (const dg of distGroupMemberships) {
-      const { error } = await ps.runCommand(
-        `Remove-DistributionGroupMember -Identity '${escapePS(dg.PrimarySmtpAddress)}' -Member '${escapePS(upn)}' -Confirm:$false`,
-      );
-      if (error) {
-        p.log.error(`${dg.DisplayName}: ${error}`);
-      } else {
-        removedDistGroups.push(dg.DisplayName);
+      if (dg.MemberCount === 1) {
+        orphans.push({ type: "Distribution group", name: dg.DisplayName });
       }
     }
-    rmDgSpin.stop(`Removed from ${removedDistGroups.length} distribution group(s).`);
-  }
-
-  // Remove security group memberships
-  if (secGroupMemberships.length > 0) {
-    const rmSgSpin = p.spinner();
-    rmSgSpin.start("Removing security group memberships...");
     for (const sg of secGroupMemberships) {
-      const { error } = await ps.runCommand(
-        `Remove-MgGroupMemberByRef -GroupId '${escapePS(sg.Id)}' -DirectoryObjectId '${escapePS(userId)}'`,
-      );
-      if (error) {
-        // May fail for dynamic groups
-        p.log.error(`${sg.DisplayName}: ${error}`);
-      } else {
-        removedSecGroups.push(sg.DisplayName);
+      if (sg.MemberCount === 1) {
+        orphans.push({ type: "Security group", name: sg.DisplayName });
       }
     }
-    rmSgSpin.stop(`Removed from ${removedSecGroups.length} security group(s).`);
+
+    if (orphans.length > 0) {
+      p.log.warn(
+        `Orphaned resources (will have no remaining members):\n${orphans.map((o) => `  - [${o.type}] ${o.name}`).join("\n")}`,
+      );
+    }
+
+    // Remove shared mailbox permissions
+    if (sharedMailboxPerms.length > 0) {
+      const rmMbSpin = p.spinner();
+      rmMbSpin.start("Removing shared mailbox permissions...");
+      for (const mb of sharedMailboxPerms) {
+        const errors: string[] = [];
+
+        if (mb.HasFullAccess) {
+          const { error } = await ps.runCommand(
+            `Remove-MailboxPermission -Identity '${escapePS(mb.PrimarySmtpAddress)}' -User '${escapePS(upn)}' -AccessRights FullAccess -Confirm:$false`,
+          );
+          if (error) errors.push(`FullAccess: ${error}`);
+        }
+        if (mb.HasSendAs) {
+          const { error } = await ps.runCommand(
+            `Remove-RecipientPermission -Identity '${escapePS(mb.PrimarySmtpAddress)}' -Trustee '${escapePS(upn)}' -AccessRights SendAs -Confirm:$false`,
+          );
+          if (error) errors.push(`SendAs: ${error}`);
+        }
+        if (mb.HasSendOnBehalf) {
+          const { error } = await ps.runCommand(
+            `Set-Mailbox -Identity '${escapePS(mb.PrimarySmtpAddress)}' -GrantSendOnBehalfTo @{Remove='${escapePS(upn)}'}`,
+          );
+          if (error) errors.push(`SendOnBehalf: ${error}`);
+        }
+
+        if (errors.length > 0) {
+          for (const err of errors) p.log.error(`${mb.DisplayName}: ${err}`);
+        }
+        removedMailboxes.push(mb.DisplayName);
+      }
+      rmMbSpin.stop(`Removed permissions from ${removedMailboxes.length} shared mailbox(es).`);
+    }
+
+    // Remove distribution group memberships
+    if (distGroupMemberships.length > 0) {
+      const rmDgSpin = p.spinner();
+      rmDgSpin.start("Removing distribution group memberships...");
+      for (const dg of distGroupMemberships) {
+        const { error } = await ps.runCommand(
+          `Remove-DistributionGroupMember -Identity '${escapePS(dg.PrimarySmtpAddress)}' -Member '${escapePS(upn)}' -Confirm:$false`,
+        );
+        if (error) {
+          p.log.error(`${dg.DisplayName}: ${error}`);
+        } else {
+          removedDistGroups.push(dg.DisplayName);
+        }
+      }
+      rmDgSpin.stop(`Removed from ${removedDistGroups.length} distribution group(s).`);
+    }
+
+    // Remove security group memberships
+    if (secGroupMemberships.length > 0) {
+      const rmSgSpin = p.spinner();
+      rmSgSpin.start("Removing security group memberships...");
+      for (const sg of secGroupMemberships) {
+        const { error } = await ps.runCommand(
+          `Remove-MgGroupMemberByRef -GroupId '${escapePS(sg.Id)}' -DirectoryObjectId '${escapePS(userId)}'`,
+        );
+        if (error) {
+          p.log.error(`${sg.DisplayName}: ${error}`);
+        } else {
+          removedSecGroups.push(sg.DisplayName);
+        }
+      }
+      rmSgSpin.stop(`Removed from ${removedSecGroups.length} security group(s).`);
+    }
   }
 
-  // Step 6: Delete user
+  // Execute: Delete user
+  let userDeleted = false;
   const delSpin = p.spinner();
   delSpin.start("Deleting user...");
   const { error: delError } = await ps.runCommand(
@@ -568,13 +611,18 @@ Get-Mailbox -RecipientTypeDetails SharedMailbox -ResultSize Unlimited | ForEach-
   if (delError) {
     delSpin.stop("Failed to delete user.");
     p.log.error(delError);
-    return;
+    p.log.warn("The user was NOT deleted. Other actions above may have already been applied.");
+  } else {
+    delSpin.stop("User deleted.");
+    userDeleted = true;
   }
-  delSpin.stop("User deleted.");
 
-  // Step 7: Final summary
+  // ── RESULTS SUMMARY ───────────────────────────────────────────────────
+
   const summaryParts: string[] = [
-    `Deleted user: ${user.DisplayName} (${upn})`,
+    userDeleted
+      ? `Deleted user: ${user.DisplayName} (${upn})`
+      : `FAILED to delete user: ${user.DisplayName} (${upn})`,
   ];
 
   if (releasedLicenses.length > 0) {
@@ -622,8 +670,12 @@ Get-Mailbox -RecipientTypeDetails SharedMailbox -ResultSize Unlimited | ForEach-
 
   p.note(summaryParts.join("\n"), "Deletion summary");
 
-  p.log.success("User deleted successfully.");
-  p.log.info(
-    "The user can be restored from the Entra ID recycle bin within 30 days.",
-  );
+  if (userDeleted) {
+    p.log.success("User deleted successfully.");
+    p.log.info(
+      "The user can be restored from the Entra ID recycle bin within 30 days.",
+    );
+  } else {
+    p.log.error("User deletion failed. Review the summary above for actions already taken.");
+  }
 }
