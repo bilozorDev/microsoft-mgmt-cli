@@ -63,6 +63,7 @@ async function main() {
         { value: "create-user", label: "Create user", hint: "will prompt to login" },
         { value: "whitelist-domain", label: "Whitelist domain(s)" },
         { value: "delete-user", label: "Delete user", hint: "will prompt to login" },
+        { value: "switch-tenant", label: "Switch tenant", hint: ps.tenantDomain ? `connected to ${ps.tenantDomain}` : undefined },
         { value: "exit", label: "Exit" },
       ],
     });
@@ -81,6 +82,20 @@ async function main() {
       case "delete-user":
         await deleteUser(ps);
         break;
+      case "switch-tenant": {
+        const switchSpin = p.spinner();
+        switchSpin.start("Disconnecting...");
+        try {
+          await ps.switchTenant();
+          switchSpin.stop(`Switched to: ${ps.tenantDomain}`);
+        } catch (e) {
+          switchSpin.stop("Failed to switch tenant.");
+          p.log.error(`${e}`);
+          await ps.end();
+          process.exit(1);
+        }
+        break;
+      }
     }
   }
 

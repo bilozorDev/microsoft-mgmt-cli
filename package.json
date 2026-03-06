@@ -4,7 +4,8 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "start": "bun run src/index.ts"
+    "start": "bun run src/index.ts",
+    "build:windows": "bun build --compile --target=bun-windows-x64 src/index.ts --outfile dist/profulgent.exe"
   },
   "devDependencies": {
     "@types/bun": "latest"

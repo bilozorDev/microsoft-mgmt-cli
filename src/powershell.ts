@@ -148,16 +148,18 @@ export class PowerShellSession {
     if (error) {
       throw new Error(`Failed to get tenant domain: ${error}`);
     }
-    this.tenantDomain = output.trim();
+    // Extract just the domain — residual async output from prior commands may be in the stream
+    const domain = output.trim().split("\n").map((l) => l.trim()).find(
+      (l) => /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(l)
+    );
+    this.tenantDomain = domain || output.trim();
     return this.tenantDomain;
   }
 
-  async end(): Promise<void> {
-    if (!this.process) return;
-
+  async switchTenant(): Promise<void> {
     if (this.graphConnected) {
       try {
-        await this.runCommand("Disconnect-MgGraph");
+        await this.runCommand("Disconnect-MgGraph *>$null");
       } catch {
         // Best-effort disconnect
       }
@@ -165,7 +167,32 @@ export class PowerShellSession {
     }
 
     try {
-      await this.runCommand("Disconnect-ExchangeOnline -Confirm:$false");
+      await this.runCommand("Disconnect-ExchangeOnline -Confirm:$false *>$null");
+    } catch {
+      // Best-effort disconnect
+    }
+
+    // Drain any residual async output from Exchange disconnect
+    await this.runCommand("Start-Sleep -Milliseconds 500");
+
+    await this.connectExchangeOnline();
+    await this.getTenantDomain();
+  }
+
+  async end(): Promise<void> {
+    if (!this.process) return;
+
+    if (this.graphConnected) {
+      try {
+        await this.runCommand("Disconnect-MgGraph *>$null");
+      } catch {
+        // Best-effort disconnect
+      }
+      this.graphConnected = false;
+    }
+
+    try {
+      await this.runCommand("Disconnect-ExchangeOnline -Confirm:$false *>$null");
     } catch {
       // Best-effort disconnect
     }
