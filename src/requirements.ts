@@ -34,7 +34,6 @@ async function checkModules(): Promise<string[]> {
       `@{
   ExchangeOnline = [bool](Get-Module -ListAvailable -Name ExchangeOnlineManagement)
   MicrosoftGraph = [bool](Get-Module -ListAvailable -Name Microsoft.Graph)
-  PnPPowerShell = [bool](Get-Module -ListAvailable -Name PnP.PowerShell)
 } | ConvertTo-Json`,
     ],
     { stdout: "pipe", stderr: "pipe" },
@@ -49,13 +48,11 @@ async function checkModules(): Promise<string[]> {
   const result = JSON.parse(output) as {
     ExchangeOnline: boolean;
     MicrosoftGraph: boolean;
-    PnPPowerShell: boolean;
   };
 
   const missing: string[] = [];
   if (!result.ExchangeOnline) missing.push("ExchangeOnlineManagement");
   if (!result.MicrosoftGraph) missing.push("Microsoft.Graph");
-  if (!result.PnPPowerShell) missing.push("PnP.PowerShell");
   return missing;
 }
 

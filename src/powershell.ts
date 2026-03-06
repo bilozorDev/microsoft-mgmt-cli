@@ -37,7 +37,6 @@ export class PowerShellSession {
   private process: Subprocess<"pipe", "pipe", "inherit"> | null = null;
   private decoder = new TextDecoder();
   private graphConnected = false;
-  private spoConnected = false;
   tenantDomain: string | null = null;
 
   async start(): Promise<void> {
@@ -133,21 +132,6 @@ export class PowerShellSession {
     this.graphConnected = true;
   }
 
-  async ensureSPOConnected(): Promise<void> {
-    if (this.spoConnected) return;
-    const { error } = await this.runCommand(
-      [
-        "$onmsDomain = Get-AcceptedDomain | Where-Object { [string]$_.DomainName -like '*.onmicrosoft.com' -and [string]$_.DomainName -notlike '*.mail.onmicrosoft.com' } | Select-Object -First 1",
-        "$tenantName = ([string]$onmsDomain.DomainName) -replace '\\.onmicrosoft\\.com$',''",
-        'Connect-PnPOnline -Url "https://$tenantName-admin.sharepoint.com" -Interactive',
-      ].join("\n"),
-    );
-    if (error) {
-      throw new Error(`Failed to connect to SharePoint Online: ${error}`);
-    }
-    this.spoConnected = true;
-  }
-
   async connectExchangeOnline(): Promise<void> {
     const { error } = await this.runCommand(
       "Connect-ExchangeOnline -ShowBanner:$false",
@@ -170,15 +154,6 @@ export class PowerShellSession {
 
   async end(): Promise<void> {
     if (!this.process) return;
-
-    if (this.spoConnected) {
-      try {
-        await this.runCommand("Disconnect-PnPOnline");
-      } catch {
-        // Best-effort disconnect
-      }
-      this.spoConnected = false;
-    }
 
     if (this.graphConnected) {
       try {

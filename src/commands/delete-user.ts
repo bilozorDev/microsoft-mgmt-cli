@@ -46,11 +46,6 @@ function elapsedTimer(spin: { message(msg?: string): void }, baseMsg: string): (
   return () => clearInterval(interval);
 }
 
-function formatStorageSize(mb: number): string {
-  if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`;
-  return `${mb} MB`;
-}
-
 async function fetchUsers(
   ps: PowerShellSession,
   excludeUpn?: string,
@@ -252,88 +247,43 @@ export async function run(ps: PowerShellSession): Promise<void> {
   }
 
   // 3. Ask about OneDrive
-  let oneDriveUrl: string | null = null;
-  let oneDriveSize: string | null = null;
-  let oneDriveDelegates: MgUser[] = [];
-
   const shareDrive = await p.confirm({
     message: "Grant another user access to this user's OneDrive?",
   });
   if (p.isCancel(shareDrive)) return;
 
   if (shareDrive) {
-    const spoSpin = p.spinner();
-    spoSpin.start("Connecting to SharePoint Online (check your browser)...");
-    let spoConnected = false;
-    try {
-      await ps.ensureSPOConnected();
-      spoSpin.stop("Connected to SharePoint Online.");
-      spoConnected = true;
-    } catch (e) {
-      spoSpin.stop("Failed to connect to SharePoint Online.");
-      p.log.error(`${e}`);
-      p.log.warn("Skipping OneDrive sharing.");
-    }
-
-    if (spoConnected) {
-      const { output: tenantDomain } = await ps.runCommand(
-        "$d = Get-AcceptedDomain | Where-Object { [string]$_.DomainName -like '*.onmicrosoft.com' -and [string]$_.DomainName -notlike '*.mail.onmicrosoft.com' } | Select-Object -First 1\n[string]$d.DomainName",
-      );
-      const tenantName = tenantDomain.trim().replace(/\.onmicrosoft\.com$/i, "");
-      const personalPath = upn.replace(/[^a-zA-Z0-9]/g, "_");
-      oneDriveUrl = `https://${tenantName}-my.sharepoint.com/personal/${personalPath}`;
-
-      const sizeSpin = p.spinner();
-      sizeSpin.start("Checking OneDrive size...");
-      const { output: sizeOutput, error: sizeError } = await ps.runCommand(
-        `Get-PnPTenantSite -Identity '${escapePS(oneDriveUrl)}' | Select-Object -ExpandProperty StorageUsageCurrent`,
-      );
-
-      if (sizeError) {
-        sizeSpin.stop("OneDrive not found or not provisioned.");
-        p.log.info("Skipping OneDrive sharing.");
-        oneDriveUrl = null;
-      } else {
-        const sizeMB = parseInt(sizeOutput.trim(), 10);
-        oneDriveSize = isNaN(sizeMB) ? "unknown size" : formatStorageSize(sizeMB);
-        sizeSpin.stop(`OneDrive is using ${oneDriveSize}.`);
-
-        oneDriveDelegates = await selectMultipleUsers(
-          ps,
-          "Select delegate(s) for OneDrive access",
-          upn,
-        );
-      }
+    p.log.warn("Sharing OneDrive from terminal is not currently supported.");
+    p.log.info("You can grant OneDrive access from the Microsoft 365 admin center instead.");
+    const cont = await p.confirm({ message: "Continue without OneDrive sharing?" });
+    if (p.isCancel(cont) || !cont) {
+      p.log.info("Cancelled.");
+      return;
     }
   }
 
   // ── CONFIRMATION ──────────────────────────────────────────────────────
 
   const planLines: string[] = [
-    `Delete user: ${user.DisplayName} (${upn})`,
+    willConvertToShared
+      ? `Convert to shared mailbox: ${user.DisplayName} (${upn})`
+      : `Delete user: ${user.DisplayName} (${upn})`,
   ];
 
   if (licenses.length > 0) {
     planLines.push(
-      `\nLicenses to release:\n${licenses.map((l) => `  - ${friendlySkuName(l.SkuPartNumber)}`).join("\n")}`,
+      `\nLicenses to ${willConvertToShared ? "remove" : "release"}:\n${licenses.map((l) => `  - ${friendlySkuName(l.SkuPartNumber)}`).join("\n")}`,
     );
   }
 
   if (willConvertToShared) {
     planLines.push("\nMailbox: Convert to shared");
+    planLines.push("Account: Convert to shared mailbox (licenses removed)");
     if (mailboxDelegates.length > 0) {
       planLines.push(
         `Mailbox delegates: ${mailboxDelegates.map((d) => d.DisplayName).join(", ")}`,
       );
     }
-  }
-
-  if (oneDriveUrl && oneDriveDelegates.length > 0) {
-    const sizeLabel = oneDriveSize ? ` (${oneDriveSize})` : "";
-    planLines.push(`\nOneDrive${sizeLabel}: Grant access`);
-    planLines.push(
-      `OneDrive delegates: ${oneDriveDelegates.map((d) => d.DisplayName).join(", ")}`,
-    );
   }
 
   if (willConvertToShared) {
@@ -342,7 +292,9 @@ export async function run(ps: PowerShellSession): Promise<void> {
 
   p.note(planLines.join("\n"), "Planned actions");
 
-  const confirm = await p.confirm({ message: "Proceed with deletion?" });
+  const confirm = await p.confirm({
+    message: willConvertToShared ? "Proceed?" : "Proceed with deletion?",
+  });
   if (p.isCancel(confirm) || !confirm) {
     p.log.info("Cancelled.");
     return;
@@ -353,7 +305,6 @@ export async function run(ps: PowerShellSession): Promise<void> {
   const releasedLicenses = licenses.map((l) => friendlySkuName(l.SkuPartNumber));
   let convertedToShared = false;
   const mailboxDelegateNames: string[] = [];
-  const oneDriveDelegateNames: string[] = [];
   const removedMailboxes: string[] = [];
   const removedDistGroups: string[] = [];
   const removedSecGroups: string[] = [];
@@ -403,24 +354,6 @@ export async function run(ps: PowerShellSession): Promise<void> {
       } else {
         dSpin.stop(`Failed to grant access to ${delegate.DisplayName}.`);
         for (const err of errors) p.log.error(err);
-      }
-    }
-  }
-
-  // Execute: Grant OneDrive access
-  if (oneDriveUrl && oneDriveDelegates.length > 0) {
-    for (const delegate of oneDriveDelegates) {
-      const dSpin = p.spinner();
-      dSpin.start(`Granting OneDrive access to ${delegate.DisplayName}...`);
-      const { error } = await ps.runCommand(
-        `Set-PnPTenantSite -Url '${escapePS(oneDriveUrl)}' -Owners '${escapePS(delegate.UserPrincipalName)}'`,
-      );
-      if (error) {
-        dSpin.stop(`Failed to grant OneDrive access to ${delegate.DisplayName}.`);
-        p.log.error(error);
-      } else {
-        dSpin.stop(`Granted OneDrive access to ${delegate.DisplayName}.`);
-        oneDriveDelegateNames.push(delegate.DisplayName);
       }
     }
   }
@@ -618,31 +551,70 @@ Get-Mailbox -RecipientTypeDetails SharedMailbox -ResultSize Unlimited | ForEach-
     }
   }
 
-  // Execute: Delete user
+  // Execute: Delete or disable user
   let userDeleted = false;
-  const delSpin = p.spinner();
-  delSpin.start("Deleting user...");
-  const { error: delError } = await ps.runCommand(
-    `Remove-MgUser -UserId '${escapePS(userId)}'`,
-  );
-  if (delError) {
-    delSpin.stop("Failed to delete user.");
-    p.log.error(delError);
-    p.log.warn("The user was NOT deleted. Other actions above may have already been applied.");
+  let userDisabled = false;
+
+  if (convertedToShared) {
+    // Remove licenses to free them up
+    if (licenses.length > 0) {
+      const licRemSpin = p.spinner();
+      licRemSpin.start("Removing licenses...");
+      const skuIds = licenses.map((l) => l.SkuId);
+      const { error } = await ps.runCommand(
+        `Set-MgUserLicense -UserId '${escapePS(userId)}' -RemoveLicenses @(${skuIds.map((id) => `'${escapePS(id)}'`).join(",")}) -AddLicenses @{}`,
+      );
+      if (error) {
+        licRemSpin.stop("Failed to remove licenses.");
+        p.log.error(error);
+      } else {
+        licRemSpin.stop("Licenses removed.");
+      }
+    }
+
+    // Block sign-in
+    const blockSpin = p.spinner();
+    blockSpin.start("Blocking sign-in...");
+    const { error: blockErr } = await ps.runCommand(
+      `Update-MgUser -UserId '${escapePS(userId)}' -AccountEnabled:$false`,
+    );
+    if (blockErr) {
+      blockSpin.stop("Failed to block sign-in.");
+      p.log.error(blockErr);
+    } else {
+      blockSpin.stop("Sign-in blocked.");
+      userDisabled = true;
+    }
   } else {
-    delSpin.stop("User deleted.");
-    userDeleted = true;
+    // No shared mailbox — fully delete the user
+    const delSpin = p.spinner();
+    delSpin.start("Deleting user...");
+    const { error: delError } = await ps.runCommand(
+      `Remove-MgUser -UserId '${escapePS(userId)}'`,
+    );
+    if (delError) {
+      delSpin.stop("Failed to delete user.");
+      p.log.error(delError);
+      p.log.warn("The user was NOT deleted. Other actions above may have already been applied.");
+    } else {
+      delSpin.stop("User deleted.");
+      userDeleted = true;
+    }
   }
 
   // ── RESULTS SUMMARY ───────────────────────────────────────────────────
 
-  const summaryParts: string[] = [
-    userDeleted
-      ? `Deleted user: ${user.DisplayName} (${upn})`
-      : `FAILED to delete user: ${user.DisplayName} (${upn})`,
-  ];
+  const summaryParts: string[] = [];
 
-  if (releasedLicenses.length > 0) {
+  if (userDisabled) {
+    summaryParts.push(`Converted to shared mailbox: ${user.DisplayName} (${upn})`);
+  } else if (userDeleted) {
+    summaryParts.push(`Deleted user: ${user.DisplayName} (${upn})`);
+  } else {
+    summaryParts.push(`FAILED to ${convertedToShared ? "convert" : "delete"} user: ${user.DisplayName} (${upn})`);
+  }
+
+  if (!convertedToShared && releasedLicenses.length > 0) {
     summaryParts.push(
       `\nLicenses released:\n${releasedLicenses.map((l) => `  - ${l}`).join("\n")}`,
     );
@@ -653,12 +625,6 @@ Get-Mailbox -RecipientTypeDetails SharedMailbox -ResultSize Unlimited | ForEach-
   }
   if (mailboxDelegateNames.length > 0) {
     summaryParts.push(`Mailbox delegates: ${mailboxDelegateNames.join(", ")}`);
-  }
-
-  if (oneDriveDelegateNames.length > 0) {
-    const sizeLabel = oneDriveSize ? ` (${oneDriveSize})` : "";
-    summaryParts.push(`\nOneDrive${sizeLabel}: Access granted`);
-    summaryParts.push(`OneDrive delegates: ${oneDriveDelegateNames.join(", ")}`);
   }
 
   if (removedMailboxes.length > 0) {
@@ -685,14 +651,16 @@ Get-Mailbox -RecipientTypeDetails SharedMailbox -ResultSize Unlimited | ForEach-
     );
   }
 
-  p.note(summaryParts.join("\n"), "Deletion summary");
+  p.note(summaryParts.join("\n"), userDisabled ? "Conversion summary" : "Deletion summary");
 
-  if (userDeleted) {
+  if (userDisabled) {
+    p.log.success("Account converted to shared mailbox.");
+  } else if (userDeleted) {
     p.log.success("User deleted successfully.");
     p.log.info(
       "The user can be restored from the Entra ID recycle bin within 30 days.",
     );
   } else {
-    p.log.error("User deletion failed. Review the summary above for actions already taken.");
+    p.log.error(`User ${convertedToShared ? "conversion" : "deletion"} failed. Review the summary above for actions already taken.`);
   }
 }

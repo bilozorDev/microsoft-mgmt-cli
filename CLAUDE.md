@@ -1,42 +1,69 @@
-# Profulgent — Exchange Online Admin CLI
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Commands
+
+- `bun install` — install dependencies
+- `bun run start` — run the CLI (`bun run src/index.ts`)
+
+No test framework or build step configured — Bun runs TypeScript directly.
 
 ## Tech Stack
 
-- **Runtime:** Bun (TypeScript)
+- **Runtime:** Bun (TypeScript, strict mode, `noEmit`)
 - **Interactive UI:** `@clack/prompts`
 - **Exchange Online:** PowerShell subprocess (`ExchangeOnlineManagement` module)
+- **Microsoft Graph:** PowerShell `Microsoft.Graph` module (lazily connected)
 
 ## Architecture
 
-Persistent PowerShell session (`src/powershell.ts`) spawned via `Bun.spawn`. A command loop script using `[Console]::In.ReadLine()` processes commands one at a time (PowerShell's `-Command -` mode buffers all stdin until EOF, so we can't use it for a persistent session).
+### PowerShell session (`src/powershell.ts`)
 
-### When to use PowerShell (ExchangeOnlineManagement module)
+Persistent `pwsh` process spawned via `Bun.spawn`. A custom loop script reads stdin line-by-line using `[Console]::In.ReadLine()` (PowerShell's `-Command -` mode buffers all stdin until EOF, so we can't use it). Commands are accumulated in a `StringBuilder` until an exec marker, then run via `Invoke-Expression`. Output uses end/error markers written through `[Console]::Out` to bypass pipeline buffering.
 
-Microsoft Graph API does **not** support organization-wide mail flow rules or anti-spam policies. PowerShell is **required** for:
+Key methods:
+- `runCommand(cmd)` → `{ output, error }` — raw string output
+- `runCommandJson<T>(cmd)` — appends `| ConvertTo-Json -Depth 5 -Compress` and parses
+- `ensureGraphConnected()` — lazy Graph connection (only when a command needs it)
+- `connectExchangeOnline()` — called at startup
 
-- Anti-spam policy management (`Set-HostedContentFilterPolicy`, `Get-HostedContentFilterPolicy`)
-- Mail flow / transport rules (`New-TransportRule`, `Set-TransportRule`)
-- Connection filter policies (`Set-HostedConnectionFilterPolicy`)
+### Startup flow (`src/index.ts`)
+
+1. `checkRequirements()` — verifies `pwsh`, ExchangeOnlineManagement, Microsoft.Graph are installed; offers auto-install
+2. Start persistent PowerShell session
+3. `Connect-ExchangeOnline` (opens browser for auth)
+4. Menu loop dispatching to commands
+
+### Commands (`src/commands/`)
+
+Each file exports `async function run(ps: PowerShellSession): Promise<void | string[]>`. To add a new command:
+
+1. Create `src/commands/<name>.ts` exporting `run(ps)`
+2. Add option to the `select()` menu in `src/index.ts`
+3. Use `ps.runCommand()` / `ps.runCommandJson()` for PowerShell execution
+
+### When to use PowerShell vs Graph API
+
+**PowerShell required** (Graph doesn't support these):
+- Anti-spam policies (`*-HostedContentFilterPolicy`)
+- Mail flow / transport rules (`*-TransportRule`)
+- Connection filter policies (`*-HostedConnectionFilterPolicy`)
 - Outbound spam policies
-- Any Exchange Admin Center operation under **Mail flow** or **Anti-spam**
 
-### When to use Microsoft Graph API
-
-Graph API should be used for operations it supports:
-
-- Mailbox settings (signatures, auto-replies, forwarding)
-- Mail folder management
-- Calendar operations
-- User/group management
-- Distribution list membership
-- Message tracking (limited)
+**Graph API** (via `ensureGraphConnected()`):
+- User/group management, license assignment
+- Distribution list and security group membership
+- Mailbox settings, calendar operations
 
 ### Auth
 
-`Connect-ExchangeOnline` handles authentication via interactive browser login. The subprocess can open a browser directly — do NOT use `-UseDeviceAuthentication` (not available in all module versions).
+`Connect-ExchangeOnline` uses interactive browser login. Do NOT use `-UseDeviceAuthentication`. Graph connects lazily via `Connect-MgGraph` with specific scopes when first needed.
 
-## Adding Commands
+## Patterns
 
-1. Create `src/commands/<name>.ts` exporting `async run(ps: PowerShellSession)`
-2. Add option to the `select()` menu in `src/index.ts`
-3. Use `ps.runCommand()` to execute PowerShell commands
+- **Single quotes in PowerShell:** escape with `value.replace(/'/g, "''")`
+- **Array normalization:** Graph may return a single object or array — use `Array.isArray(raw) ? raw : [raw]`
+- **Cancel handling:** all `@clack/prompts` calls must check `p.isCancel()` and bail
+- **Spinners:** wrap long operations with `p.spinner().start()` / `.stop()`
+- **Error flow:** check `error` property from `runCommand()`; display with `p.log.error()` but generally continue
