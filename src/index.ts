@@ -4,6 +4,8 @@ import { checkRequirements } from "./requirements.ts";
 import { run as whitelistDomain } from "./commands/whitelist-domain.ts";
 import { run as createUser } from "./commands/create-user.ts";
 import { run as deleteUser } from "./commands/delete-user.ts";
+import { run as inactiveUsers } from "./commands/inactive-users.ts";
+import { run as sharedMailboxes } from "./commands/shared-mailboxes.ts";
 
 const ps = new PowerShellSession();
 
@@ -57,44 +59,95 @@ async function main() {
 
   // Main menu loop
   while (true) {
-    const action = await p.select({
+    const category = await p.select({
       message: "What would you like to do?",
       options: [
-        { value: "create-user", label: "Create user", hint: "will prompt to login" },
-        { value: "whitelist-domain", label: "Whitelist domain(s)" },
-        { value: "delete-user", label: "Delete user", hint: "will prompt to login" },
+        { value: "user-management", label: "User Management" },
+        { value: "spam-management", label: "Spam Management" },
+        { value: "reports", label: "Reports" },
         { value: "switch-tenant", label: "Switch tenant", hint: ps.tenantDomain ? `connected to ${ps.tenantDomain}` : undefined },
         { value: "exit", label: "Exit" },
       ],
     });
 
-    if (p.isCancel(action) || action === "exit") {
+    if (p.isCancel(category) || category === "exit") {
       break;
     }
 
-    switch (action) {
-      case "create-user":
-        await createUser(ps);
-        break;
-      case "whitelist-domain":
-        await whitelistDomain(ps);
-        break;
-      case "delete-user":
-        await deleteUser(ps);
-        break;
-      case "switch-tenant": {
-        const switchSpin = p.spinner();
-        switchSpin.start("Disconnecting...");
-        try {
-          await ps.switchTenant();
-          switchSpin.stop(`Switched to: ${ps.tenantDomain}`);
-        } catch (e) {
-          switchSpin.stop("Failed to switch tenant.");
-          p.log.error(`${e}`);
-          await ps.end();
-          process.exit(1);
-        }
-        break;
+    if (category === "switch-tenant") {
+      const switchSpin = p.spinner();
+      switchSpin.start("Disconnecting...");
+      try {
+        await ps.switchTenant();
+        switchSpin.stop(`Switched to: ${ps.tenantDomain}`);
+      } catch (e) {
+        switchSpin.stop("Failed to switch tenant.");
+        p.log.error(`${e}`);
+        await ps.end();
+        process.exit(1);
+      }
+      continue;
+    }
+
+    if (category === "user-management") {
+      const action = await p.select({
+        message: "User Management",
+        options: [
+          { value: "create-user", label: "Create user", hint: "will prompt to login" },
+          { value: "delete-user", label: "Delete user", hint: "will prompt to login" },
+          { value: "back", label: "Back" },
+        ],
+      });
+
+      if (p.isCancel(action) || action === "back") continue;
+
+      switch (action) {
+        case "create-user":
+          await createUser(ps);
+          break;
+        case "delete-user":
+          await deleteUser(ps);
+          break;
+      }
+    }
+
+    if (category === "reports") {
+      const action = await p.select({
+        message: "Reports",
+        options: [
+          { value: "inactive-users", label: "Inactive users" },
+          { value: "shared-mailboxes", label: "Shared mailboxes" },
+          { value: "back", label: "Back" },
+        ],
+      });
+
+      if (p.isCancel(action) || action === "back") continue;
+
+      switch (action) {
+        case "inactive-users":
+          await inactiveUsers(ps);
+          break;
+        case "shared-mailboxes":
+          await sharedMailboxes(ps);
+          break;
+      }
+    }
+
+    if (category === "spam-management") {
+      const action = await p.select({
+        message: "Spam Management",
+        options: [
+          { value: "whitelist-domain", label: "Whitelist domain(s)" },
+          { value: "back", label: "Back" },
+        ],
+      });
+
+      if (p.isCancel(action) || action === "back") continue;
+
+      switch (action) {
+        case "whitelist-domain":
+          await whitelistDomain(ps);
+          break;
       }
     }
   }
