@@ -1,6 +1,7 @@
 import * as p from "@clack/prompts";
 import { PowerShellSession } from "./powershell.ts";
 import { run as whitelistDomain } from "./commands/whitelist-domain.ts";
+import { run as createUser } from "./commands/create-user.ts";
 
 const ps = new PowerShellSession();
 
@@ -55,6 +56,7 @@ async function main() {
     const action = await p.select({
       message: "What would you like to do?",
       options: [
+        { value: "create-user", label: "Create user" },
         { value: "whitelist-domain", label: "Whitelist domain(s)" },
         { value: "exit", label: "Exit" },
       ],
@@ -65,6 +67,9 @@ async function main() {
     }
 
     switch (action) {
+      case "create-user":
+        await createUser(ps);
+        break;
       case "whitelist-domain":
         await whitelistDomain(ps);
         break;

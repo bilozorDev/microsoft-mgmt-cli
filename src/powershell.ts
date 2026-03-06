@@ -35,6 +35,7 @@ while ($true) {
 export class PowerShellSession {
   private process: Subprocess<"pipe", "pipe", "inherit"> | null = null;
   private decoder = new TextDecoder();
+  private graphConnected = false;
   tenantDomain: string | null = null;
 
   async start(): Promise<void> {
@@ -96,6 +97,26 @@ export class PowerShellSession {
     return accumulated;
   }
 
+  async runCommandJson<T>(command: string): Promise<T> {
+    const { output, error } = await this.runCommand(
+      `${command} | ConvertTo-Json -Depth 5 -Compress`,
+    );
+    if (error) throw new Error(error);
+    if (!output) return [] as unknown as T;
+    return JSON.parse(output) as T;
+  }
+
+  async ensureGraphConnected(): Promise<void> {
+    if (this.graphConnected) return;
+    const { error } = await this.runCommand(
+      'Connect-MgGraph -Scopes "User.ReadWrite.All","Organization.Read.All","Directory.ReadWrite.All" -NoWelcome',
+    );
+    if (error) {
+      throw new Error(`Failed to connect to Microsoft Graph: ${error}`);
+    }
+    this.graphConnected = true;
+  }
+
   async connectExchangeOnline(): Promise<void> {
     const { error } = await this.runCommand(
       "Connect-ExchangeOnline -ShowBanner:$false",
@@ -118,6 +139,15 @@ export class PowerShellSession {
 
   async end(): Promise<void> {
     if (!this.process) return;
+
+    if (this.graphConnected) {
+      try {
+        await this.runCommand("Disconnect-MgGraph");
+      } catch {
+        // Best-effort disconnect
+      }
+      this.graphConnected = false;
+    }
 
     try {
       await this.runCommand("Disconnect-ExchangeOnline -Confirm:$false");
