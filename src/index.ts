@@ -1,5 +1,6 @@
 import * as p from "@clack/prompts";
 import { PowerShellSession } from "./powershell.ts";
+import { checkRequirements } from "./requirements.ts";
 import { run as whitelistDomain } from "./commands/whitelist-domain.ts";
 import { run as createUser } from "./commands/create-user.ts";
 
@@ -17,6 +18,8 @@ process.on("SIGTERM", () => void cleanup());
 
 async function main() {
   p.intro("Profulgent — Exchange Online Admin CLI");
+
+  await checkRequirements();
 
   // Start PowerShell session
   const connectSpin = p.spinner();
