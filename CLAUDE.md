@@ -6,6 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - `bun install` — install dependencies
 - `bun run start` — run the CLI (`bun run src/index.ts`)
+- `bun run build:windows` — compile Windows exe to `dist/profulgent.exe`
 
 No test framework or build step configured — Bun runs TypeScript directly.
 
@@ -15,6 +16,7 @@ No test framework or build step configured — Bun runs TypeScript directly.
 - **Interactive UI:** `@clack/prompts`
 - **Exchange Online:** PowerShell subprocess (`ExchangeOnlineManagement` module)
 - **Microsoft Graph:** PowerShell `Microsoft.Graph` module (lazily connected)
+- **Excel reports:** `exceljs` via reusable template (`src/report-template.ts`)
 
 ## Architecture
 
@@ -33,15 +35,38 @@ Key methods:
 1. `checkRequirements()` — verifies `pwsh`, ExchangeOnlineManagement, Microsoft.Graph are installed; offers auto-install
 2. Start persistent PowerShell session
 3. `Connect-ExchangeOnline` (opens browser for auth)
-4. Menu loop dispatching to commands
+4. Menu loop with category submenus (User Management, Spam Management, Reports)
 
 ### Commands (`src/commands/`)
 
 Each file exports `async function run(ps: PowerShellSession): Promise<void | string[]>`. To add a new command:
 
 1. Create `src/commands/<name>.ts` exporting `run(ps)`
-2. Add option to the `select()` menu in `src/index.ts`
+2. Import in `src/index.ts`, add option to the relevant submenu `select()`, add `case` in the switch
 3. Use `ps.runCommand()` / `ps.runCommandJson()` for PowerShell execution
+
+### Excel report template (`src/report-template.ts`)
+
+All Excel reports use `generateReport(opts)` which produces a branded workbook buffer. To add a new report with Excel export:
+
+```ts
+import { generateReport } from "../report-template.ts";
+
+const buffer = await generateReport({
+  sheetName: "My Report",
+  title: "My Report Title",
+  tenant: ps.tenantDomain ?? "Unknown",
+  summary: "10 items found",
+  columns: [
+    { header: "Name", width: 30 },
+    { header: "Email", width: 38 },
+  ],
+  rows: data.map((d) => [d.name, d.email]),
+});
+await Bun.write(fullPath, buffer);
+```
+
+The template handles: logo (`src/assets/logo.png`), title/tenant/date/summary header rows, contact info (`Profulgent · Helpdesk +1 732 242 9345 · support@profulgent.net`), blue divider, styled table headers (#2B5797 background), and alternating row fills (#E8EDF2). To change branding (phone, logo, colors), edit `src/report-template.ts` once — all reports inherit the change.
 
 ### When to use PowerShell vs Graph API
 
@@ -50,6 +75,7 @@ Each file exports `async function run(ps: PowerShellSession): Promise<void | str
 - Mail flow / transport rules (`*-TransportRule`)
 - Connection filter policies (`*-HostedConnectionFilterPolicy`)
 - Outbound spam policies
+- Shared mailbox management (`Get-Mailbox`, `Get-MailboxPermission`, `Get-RecipientPermission`)
 
 **Graph API** (via `ensureGraphConnected()`):
 - User/group management, license assignment

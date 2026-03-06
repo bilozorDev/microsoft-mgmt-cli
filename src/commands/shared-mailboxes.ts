@@ -1,12 +1,24 @@
-import { resolve } from "path";
+import { resolve, dirname } from "path";
 import * as p from "@clack/prompts";
 import type { PowerShellSession } from "../powershell.ts";
+import { friendlySkuName } from "../sku-names.ts";
+import { generateReport } from "../report-template.ts";
 
 interface SharedMailbox {
   DisplayName: string;
   PrimarySmtpAddress: string;
   Alias: string;
   WhenCreated: string;
+}
+
+interface SubscribedSku {
+  SkuId: string;
+  SkuPartNumber: string;
+}
+
+interface GraphUser {
+  UserPrincipalName: string;
+  LicenseSkuIds: string[];
 }
 
 interface MailboxPermission {
@@ -38,9 +50,70 @@ export async function run(ps: PowerShellSession): Promise<void> {
     return;
   }
 
+  // Check for licenses via Graph
+  spin.start("Checking for unnecessary licenses…");
+  let licenseMap = new Map<string, string[]>(); // UPN → friendly license names
+  try {
+    await ps.ensureGraphConnected();
+
+    // Build filter for shared mailbox UPNs
+    const upns = mailboxes.map((m) => m.PrimarySmtpAddress);
+    const filterParts = upns.map((u) => `UserPrincipalName eq '${u.replace(/'/g, "''")}'`);
+    // Graph $filter has a URL length limit — batch in groups of 15
+    const chunks: string[][] = [];
+    for (let i = 0; i < filterParts.length; i += 15) {
+      chunks.push(filterParts.slice(i, i + 15));
+    }
+
+    const graphUsers: GraphUser[] = [];
+    for (const chunk of chunks) {
+      const filter = chunk.join(" or ");
+      const chunkRaw = await ps.runCommandJson<GraphUser | GraphUser[]>(
+        `Get-MgUser -Filter "${filter}" -Property UserPrincipalName,AssignedLicenses | ForEach-Object { [PSCustomObject]@{ UserPrincipalName = $_.UserPrincipalName; LicenseSkuIds = @($_.AssignedLicenses.SkuId) } }`,
+      );
+      if (chunkRaw) {
+        const arr = Array.isArray(chunkRaw) ? chunkRaw : [chunkRaw];
+        graphUsers.push(...arr);
+      }
+    }
+
+    // Fetch SKU names for friendly display
+    const skuRaw = await ps.runCommandJson<SubscribedSku | SubscribedSku[]>(
+      `Get-MgSubscribedSku | Select-Object SkuId, SkuPartNumber`,
+    );
+    const skuList = skuRaw ? (Array.isArray(skuRaw) ? skuRaw : [skuRaw]) : [];
+    const skuMap = new Map(skuList.map((s) => [s.SkuId, s.SkuPartNumber]));
+
+    for (const gu of graphUsers) {
+      const ids = (gu.LicenseSkuIds ?? []).filter(Boolean);
+      if (ids.length > 0) {
+        const names = ids.map((id) => {
+          const part = skuMap.get(id);
+          return part ? friendlySkuName(part) : id;
+        });
+        licenseMap.set(gu.UserPrincipalName.toLowerCase(), names);
+      }
+    }
+
+    const licensedCount = licenseMap.size;
+    spin.stop(
+      licensedCount > 0
+        ? `Warning: ${licensedCount} shared mailbox(es) have licenses assigned.`
+        : "No unnecessary licenses found.",
+    );
+
+    if (licensedCount > 0) {
+      p.log.warn(
+        "Shared mailboxes don't need licenses. Removing them can save costs.",
+      );
+    }
+  } catch {
+    spin.stop("Could not check licenses (Graph connection failed).");
+  }
+
   // Display table
-  const header = `${"Name".padEnd(30)} ${"Email".padEnd(40)} ${"Created".padEnd(12)}`;
-  const separator = "─".repeat(header.length);
+  const header = `${"Name".padEnd(30)} ${"Email".padEnd(40)} ${"Created".padEnd(12)} Licenses`;
+  const separator = "─".repeat(header.length + 20);
   const displayRows = mailboxes.slice(0, 50);
   const rows = displayRows.map((m) => {
     const name = truncate(m.DisplayName ?? "", 29).padEnd(30);
@@ -48,7 +121,9 @@ export async function run(ps: PowerShellSession): Promise<void> {
     const created = m.WhenCreated
       ? new Date(m.WhenCreated).toISOString().slice(0, 10)
       : "";
-    return `${name} ${email} ${created.padEnd(12)}`;
+    const licenses = licenseMap.get(m.PrimarySmtpAddress.toLowerCase());
+    const licStr = licenses ? `⚠ ${licenses.join(", ")}` : "—";
+    return `${name} ${email} ${created.padEnd(12)} ${licStr}`;
   });
 
   const lines = [header, separator, ...rows];
@@ -57,37 +132,58 @@ export async function run(ps: PowerShellSession): Promise<void> {
   }
   p.note(lines.join("\n"), `Shared mailboxes (${mailboxes.length})`);
 
-  // CSV export
-  const exportCsv = await p.confirm({
-    message: "Export to CSV?",
+  // Excel export
+  const exportXlsx = await p.confirm({
+    message: "Export full results to Excel?",
     initialValue: false,
   });
-  if (p.isCancel(exportCsv)) return;
+  if (p.isCancel(exportXlsx)) return;
 
-  if (exportCsv) {
+  if (exportXlsx) {
     const tenantSlug = (ps.tenantDomain ?? "tenant").replace(/\./g, "-");
     const dateSlug = new Date().toISOString().slice(0, 10);
-    const defaultName = `${tenantSlug}-shared-mailboxes-${dateSlug}.csv`;
+    const defaultName = `${tenantSlug}-shared-mailboxes-${dateSlug}.xlsx`;
 
-    const csvPath = await p.text({
+    const xlsxPath = await p.text({
       message: "File path",
       placeholder: defaultName,
       defaultValue: defaultName,
     });
-    if (p.isCancel(csvPath)) return;
+    if (p.isCancel(xlsxPath)) return;
 
-    const fullPath = resolve((csvPath as string).trim());
-    const csvLines = [
-      "DisplayName,PrimarySmtpAddress,Alias,WhenCreated",
-      ...mailboxes.map((m) => {
-        const created = m.WhenCreated
-          ? new Date(m.WhenCreated).toISOString().slice(0, 10)
-          : "";
-        return `"${(m.DisplayName ?? "").replace(/"/g, '""')}","${m.PrimarySmtpAddress}","${m.Alias}","${created}"`;
+    const fullPath = resolve((xlsxPath as string).trim());
+
+    spin.start("Generating Excel report…");
+
+    const buffer = await generateReport({
+      sheetName: "Shared Mailboxes",
+      title: "Shared Mailboxes Report",
+      tenant: ps.tenantDomain ?? "Unknown",
+      summary: `${mailboxes.length} shared mailbox(es) · ${licenseMap.size} with licenses`,
+      columns: [
+        { header: "Display Name", width: 30 },
+        { header: "Email", width: 38 },
+        { header: "Alias", width: 20 },
+        { header: "Created", width: 16 },
+        { header: "Licenses", width: 40 },
+      ],
+      rows: mailboxes.map((m) => {
+        const licenses = licenseMap.get(m.PrimarySmtpAddress.toLowerCase());
+        return [
+          m.DisplayName ?? "",
+          m.PrimarySmtpAddress,
+          m.Alias,
+          m.WhenCreated ? new Date(m.WhenCreated).toISOString().slice(0, 10) : "",
+          licenses ? licenses.join("; ") : "",
+        ];
       }),
-    ];
-    await Bun.write(fullPath, csvLines.join("\n"));
-    p.log.success(`Exported to ${fullPath}`);
+    });
+
+    await Bun.write(fullPath, buffer);
+    spin.stop(`Exported ${mailboxes.length} rows to ${fullPath}`);
+
+    const folder = dirname(fullPath);
+    Bun.spawn(["open", folder]);
   }
 
   // Permission drill-down

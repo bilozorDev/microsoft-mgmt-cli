@@ -1,12 +1,9 @@
 import { resolve, dirname, join } from "path";
+import { mkdirSync } from "fs";
 import * as p from "@clack/prompts";
-import ExcelJS from "exceljs";
 import type { PowerShellSession } from "../powershell.ts";
 import { friendlySkuName } from "../sku-names.ts";
-
-function getTemplatePath(): string {
-  return join(import.meta.dir, "..", "assets", "report-template.xlsx");
-}
+import { generateReport } from "../report-template.ts";
 
 interface SubscribedSku {
   SkuId: string;
@@ -234,7 +231,8 @@ export async function run(ps: PowerShellSession): Promise<void> {
 
   const tenantSlug = (ps.tenantDomain ?? "tenant").replace(/\./g, "-");
   const dateSlug = new Date().toISOString().slice(0, 10);
-  const defaultName = `${tenantSlug}-users-report-${dateSlug}.xlsx`;
+  const outputDir = join(process.cwd(), "reports output");
+  const defaultName = join(outputDir, `${tenantSlug}-users-report-${dateSlug}.xlsx`);
 
   const xlsxPath = await p.text({
     message: "File path",
@@ -244,71 +242,38 @@ export async function run(ps: PowerShellSession): Promise<void> {
   if (p.isCancel(xlsxPath)) return;
 
   const fullPath = resolve((xlsxPath as string).trim());
+  mkdirSync(dirname(fullPath), { recursive: true });
 
   spin.start("Generating Excel report…");
 
-  // Load branded template
-  const wb = new ExcelJS.Workbook();
-  await wb.xlsx.readFile(getTemplatePath());
-  const ws = wb.getWorksheet("Inactive Users")!;
-
-  // Fill dynamic placeholders
-  ws.getCell("C3").value = (companyName as string).trim();
-  const reportDate = new Date().toLocaleDateString("en-US", {
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-  });
-  ws.getCell("C4").value = `Report generated: ${reportDate}`;
-  ws.getCell("A9").value = `${inactive.length} inactive (>${days} days) · ${neverCount} never signed in`;
-
-  // Data row styling
-  const thinBorder: Partial<ExcelJS.Borders> = {
-    top: { style: "thin", color: { argb: "FFB0B0B0" } },
-    bottom: { style: "thin", color: { argb: "FFB0B0B0" } },
-    left: { style: "thin", color: { argb: "FFB0B0B0" } },
-    right: { style: "thin", color: { argb: "FFB0B0B0" } },
-  };
-  const altFill: ExcelJS.Fill = {
-    type: "pattern",
-    pattern: "solid",
-    fgColor: { argb: "FFE8EDF2" },
-  };
-  const dataFont: Partial<ExcelJS.Font> = {
-    size: 11,
-    name: "Calibri",
-    family: 2,
-  };
-
-  // Write data rows starting at row 11
-  inactive.forEach((u, idx) => {
-    const rowNum = 11 + idx;
-    const row = ws.getRow(rowNum);
-    const lastSign = getLastSignIn(u);
-    const values = [
-      u.DisplayName ?? "",
-      u.UserPrincipalName,
-      formatDate(lastSign),
-      u.CreatedDateTime
-        ? new Date(u.CreatedDateTime).toISOString().slice(0, 10)
-        : "",
-      getUserLicenses(u, skuMap).join("; "),
-      u.AccountEnabled ? "" : "Sign-in blocked",
-    ];
-
-    values.forEach((v, ci) => {
-      const cell = row.getCell(ci + 1);
-      cell.value = v;
-      cell.font = dataFont;
-      cell.border = thinBorder;
-      if (idx % 2 === 0) {
-        cell.fill = altFill;
-      }
-    });
+  const buffer = await generateReport({
+    sheetName: "Inactive Users",
+    title: "Inactive Users Report",
+    tenant: (companyName as string).trim(),
+    summary: `${inactive.length} inactive (>${days} days) · ${neverCount} never signed in`,
+    columns: [
+      { header: "Display Name", width: 30 },
+      { header: "UPN", width: 38 },
+      { header: "Last Sign-In", width: 16 },
+      { header: "Created", width: 16 },
+      { header: "Licenses", width: 45 },
+      { header: "Notes", width: 20 },
+    ],
+    rows: inactive.map((u) => {
+      const lastSign = getLastSignIn(u);
+      return [
+        u.DisplayName ?? "",
+        u.UserPrincipalName,
+        formatDate(lastSign),
+        u.CreatedDateTime
+          ? new Date(u.CreatedDateTime).toISOString().slice(0, 10)
+          : "",
+        getUserLicenses(u, skuMap).join("; "),
+        u.AccountEnabled ? "" : "Sign-in blocked",
+      ];
+    }),
   });
 
-  // Write file
-  const buffer = await wb.xlsx.writeBuffer();
   await Bun.write(fullPath, buffer);
   spin.stop(`Exported ${inactive.length} rows to ${fullPath}`);
 

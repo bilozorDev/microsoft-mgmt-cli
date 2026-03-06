@@ -116,7 +116,7 @@ async function main() {
         message: "Reports",
         options: [
           { value: "inactive-users", label: "Inactive users" },
-          { value: "shared-mailboxes", label: "Shared mailboxes" },
+          { value: "shared-mailboxes", label: "Shared mailboxes", hint: "will prompt to login" },
           { value: "back", label: "Back" },
         ],
       });
