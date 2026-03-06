@@ -41,33 +41,34 @@ export async function run(ps: PowerShellSession): Promise<void> {
     return;
   }
 
-  // 2. Full name
+  // 2. First name, last name, display name
+  const firstName = await p.text({
+    message: "First name",
+    placeholder: "Jane",
+    validate: (v = "") => !v.trim() ? "First name is required" : undefined,
+  });
+  if (p.isCancel(firstName)) return;
+
+  const lastName = await p.text({
+    message: "Last name",
+    placeholder: "Doe",
+    validate: (v = "") => !v.trim() ? "Last name is required" : undefined,
+  });
+  if (p.isCancel(lastName)) return;
+
   const displayName = await p.text({
-    message: "Full name (display name)",
-    placeholder: "Jane Doe",
-    validate: (v = "") => !v.trim() ? "Name is required" : undefined,
+    message: "Display name",
+    initialValue: `${firstName} ${lastName}`,
+    validate: (v = "") => !v.trim() ? "Display name is required" : undefined,
   });
   if (p.isCancel(displayName)) return;
 
   // 3–4. Username + domain selection (with UPN availability check)
-  let domains: AcceptedDomain[];
-  const domainSpin = p.spinner();
-  domainSpin.start("Fetching accepted domains...");
-  try {
-    const raw = await ps.runCommandJson<AcceptedDomain | AcceptedDomain[]>(
-      "Get-AcceptedDomain | Select-Object DomainName, Default",
-    );
-    domains = Array.isArray(raw) ? raw : [raw];
-    domainSpin.stop(`Found ${domains.length} domain(s).`);
-  } catch (e) {
-    domainSpin.stop("Failed to fetch domains.");
-    p.log.error(`${e}`);
-    return;
-  }
-
-  const defaultDomain = domains.find((d) => d.Default)?.DomainName ?? domains[0]?.DomainName;
   let upn: string;
-  let lastUsername = suggestUsername(displayName);
+  let lastUsername = suggestUsername(`${firstName} ${lastName}`);
+
+  let domains: AcceptedDomain[] | null = null;
+  let defaultDomain: string | undefined;
 
   upnLoop: while (true) {
     const username = await p.text({
@@ -80,6 +81,23 @@ export async function run(ps: PowerShellSession): Promise<void> {
     });
     if (p.isCancel(username)) return;
     lastUsername = username;
+
+    if (!domains) {
+      const domainSpin = p.spinner();
+      domainSpin.start("Fetching accepted domains...");
+      try {
+        const raw = await ps.runCommandJson<AcceptedDomain | AcceptedDomain[]>(
+          "Get-AcceptedDomain | Select-Object DomainName, Default",
+        );
+        domains = Array.isArray(raw) ? raw : [raw];
+        domainSpin.stop(`Found ${domains.length} domain(s).`);
+      } catch (e) {
+        domainSpin.stop("Failed to fetch domains.");
+        p.log.error(`${e}`);
+        return;
+      }
+      defaultDomain = domains.find((d) => d.Default)?.DomainName ?? domains[0]?.DomainName;
+    }
 
     const domain = await p.select({
       message: "Domain",
@@ -235,6 +253,8 @@ export async function run(ps: PowerShellSession): Promise<void> {
   const createCmd = [
     "New-MgUser -BodyParameter @{",
     `  DisplayName = '${escapePS(displayName)}'`,
+    `  GivenName = '${escapePS(firstName)}'`,
+    `  Surname = '${escapePS(lastName)}'`,
     `  UserPrincipalName = '${escapePS(upn)}'`,
     `  MailNickname = '${escapePS(upn.split("@")[0]!)}'`,
     "  AccountEnabled = $true",

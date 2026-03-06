@@ -73,59 +73,54 @@ export async function run(ps: PowerShellSession, upn: string): Promise<string[]>
     break;
   }
 
+  const permLabels: Record<string, string> = {
+    "read-manage": "Read and Manage",
+    "send-as": "Send As",
+    "send-on-behalf": "Send on Behalf",
+  };
+  const permsSummary = permissions.map((p) => permLabels[p]).join(", ");
   const added: string[] = [];
 
   for (const mailbox of selectedAddresses) {
     const name = mailboxes.find((m) => m.PrimarySmtpAddress === mailbox)?.DisplayName ?? mailbox;
-    let anySuccess = false;
+    const spin = p.spinner();
+    spin.start(`Granting permissions on ${name}...`);
+
+    const errors: string[] = [];
 
     for (const perm of permissions) {
-      const permSpin = p.spinner();
+      let result: { error: string };
 
       if (perm === "read-manage") {
-        permSpin.start(`Granting Read and Manage on ${name}...`);
-        const { error } = await ps.runCommand(
+        result = await ps.runCommand(
           `Add-MailboxPermission -Identity '${escapePS(mailbox)}' -User '${escapePS(upn)}' -AccessRights FullAccess -InheritanceType All -AutoMapping $true`,
         );
-        if (error) {
-          permSpin.stop(`Failed to grant Read and Manage on ${name}.`);
-          p.log.error(error);
-        } else {
-          permSpin.stop(`Read and Manage granted on ${name}.`);
-          anySuccess = true;
-        }
-      }
-
-      if (perm === "send-as") {
-        permSpin.start(`Granting Send As on ${name}...`);
-        const { error } = await ps.runCommand(
+      } else if (perm === "send-as") {
+        result = await ps.runCommand(
           `Add-RecipientPermission -Identity '${escapePS(mailbox)}' -Trustee '${escapePS(upn)}' -AccessRights SendAs -Confirm:$false`,
         );
-        if (error) {
-          permSpin.stop(`Failed to grant Send As on ${name}.`);
-          p.log.error(error);
-        } else {
-          permSpin.stop(`Send As granted on ${name}.`);
-          anySuccess = true;
-        }
-      }
-
-      if (perm === "send-on-behalf") {
-        permSpin.start(`Granting Send on Behalf on ${name}...`);
-        const { error } = await ps.runCommand(
+      } else {
+        result = await ps.runCommand(
           `Set-Mailbox -Identity '${escapePS(mailbox)}' -GrantSendOnBehalfTo @{Add='${escapePS(upn)}'}`,
         );
-        if (error) {
-          permSpin.stop(`Failed to grant Send on Behalf on ${name}.`);
-          p.log.error(error);
-        } else {
-          permSpin.stop(`Send on Behalf granted on ${name}.`);
-          anySuccess = true;
-        }
+      }
+
+      if (result.error) {
+        errors.push(`${permLabels[perm]}: ${result.error}`);
       }
     }
 
-    if (anySuccess) added.push(name);
+    if (errors.length === 0) {
+      spin.stop(`${name}: granted ${permsSummary}.`);
+      added.push(name);
+    } else if (errors.length < permissions.length) {
+      spin.stop(`${name}: some permissions failed.`);
+      added.push(name);
+      for (const err of errors) p.log.error(err);
+    } else {
+      spin.stop(`${name}: failed to grant permissions.`);
+      for (const err of errors) p.log.error(err);
+    }
   }
 
   return added;
