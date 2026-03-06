@@ -3,6 +3,7 @@ import { PowerShellSession } from "./powershell.ts";
 import { checkRequirements } from "./requirements.ts";
 import { run as whitelistDomain } from "./commands/whitelist-domain.ts";
 import { run as createUser } from "./commands/create-user.ts";
+import { run as deleteUser } from "./commands/delete-user.ts";
 
 const ps = new PowerShellSession();
 
@@ -61,6 +62,7 @@ async function main() {
       options: [
         { value: "create-user", label: "Create user", hint: "will prompt to login" },
         { value: "whitelist-domain", label: "Whitelist domain(s)" },
+        { value: "delete-user", label: "Delete user" },
         { value: "exit", label: "Exit" },
       ],
     });
@@ -75,6 +77,9 @@ async function main() {
         break;
       case "whitelist-domain":
         await whitelistDomain(ps);
+        break;
+      case "delete-user":
+        await deleteUser(ps);
         break;
     }
   }
