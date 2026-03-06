@@ -91,14 +91,24 @@ async function fetchUsers(
         users = [];
       }
 
+      // Filter before checking if empty, so excluded user doesn't count
+      if (excludeUpn) {
+        users = users.filter(
+          (u) => u.UserPrincipalName.toLowerCase() !== excludeUpn.toLowerCase(),
+        );
+      }
+
       if (users.length === 0) {
         p.log.warn("No users found. Try a different search term.");
         continue;
       }
       break;
     }
+
+    return users.sort((a, b) => a.DisplayName.localeCompare(b.DisplayName));
   }
 
+  // Filter for the non-search path
   if (excludeUpn) {
     users = users.filter(
       (u) => u.UserPrincipalName.toLowerCase() !== excludeUpn.toLowerCase(),
@@ -134,21 +144,28 @@ async function selectMultipleUsers(
   message: string,
   excludeUpn?: string,
 ): Promise<MgUser[]> {
-  const users = await fetchUsers(ps, excludeUpn);
-  if (users.length === 0) return [];
+  while (true) {
+    const users = await fetchUsers(ps, excludeUpn);
 
-  const selected = await p.multiselect({
-    message,
-    options: users.map((u) => ({
-      value: u.Id,
-      label: u.DisplayName,
-      hint: u.UserPrincipalName,
-    })),
-    required: true,
-  });
-  if (p.isCancel(selected)) return [];
+    if (users.length === 0) {
+      const retry = await p.confirm({ message: "No other users found. Search again?" });
+      if (p.isCancel(retry) || !retry) return [];
+      continue;
+    }
 
-  return users.filter((u) => selected.includes(u.Id));
+    const selected = await p.multiselect({
+      message: `${message} (space to select, enter to confirm)`,
+      options: users.map((u) => ({
+        value: u.Id,
+        label: u.DisplayName,
+        hint: u.UserPrincipalName,
+      })),
+      required: true,
+    });
+    if (p.isCancel(selected)) return [];
+
+    return users.filter((u) => selected.includes(u.Id));
+  }
 }
 
 export async function run(ps: PowerShellSession): Promise<void> {
@@ -260,16 +277,16 @@ export async function run(ps: PowerShellSession): Promise<void> {
 
     if (spoConnected) {
       const { output: tenantDomain } = await ps.runCommand(
-        "Get-AcceptedDomain | Where-Object { $_.DomainName -like '*.onmicrosoft.com' -and $_.DomainName -notlike '*.mail.onmicrosoft.com' } | Select-Object -ExpandProperty DomainName",
+        "$d = Get-AcceptedDomain | Where-Object { [string]$_.DomainName -like '*.onmicrosoft.com' -and [string]$_.DomainName -notlike '*.mail.onmicrosoft.com' } | Select-Object -First 1\n[string]$d.DomainName",
       );
-      const tenantName = tenantDomain.trim().replace(".onmicrosoft.com", "");
+      const tenantName = tenantDomain.trim().replace(/\.onmicrosoft\.com$/i, "");
       const personalPath = upn.replace(/[^a-zA-Z0-9]/g, "_");
       oneDriveUrl = `https://${tenantName}-my.sharepoint.com/personal/${personalPath}`;
 
       const sizeSpin = p.spinner();
       sizeSpin.start("Checking OneDrive size...");
       const { output: sizeOutput, error: sizeError } = await ps.runCommand(
-        `Get-SPOSite -Identity '${escapePS(oneDriveUrl)}' | Select-Object -ExpandProperty StorageUsageCurrent`,
+        `Get-PnPTenantSite -Identity '${escapePS(oneDriveUrl)}' | Select-Object -ExpandProperty StorageUsageCurrent`,
       );
 
       if (sizeError) {
@@ -396,7 +413,7 @@ export async function run(ps: PowerShellSession): Promise<void> {
       const dSpin = p.spinner();
       dSpin.start(`Granting OneDrive access to ${delegate.DisplayName}...`);
       const { error } = await ps.runCommand(
-        `Set-SPOUser -Site '${escapePS(oneDriveUrl)}' -LoginName '${escapePS(delegate.UserPrincipalName)}' -IsSiteCollectionAdmin $true`,
+        `Set-PnPTenantSite -Url '${escapePS(oneDriveUrl)}' -Owners '${escapePS(delegate.UserPrincipalName)}'`,
       );
       if (error) {
         dSpin.stop(`Failed to grant OneDrive access to ${delegate.DisplayName}.`);
