@@ -19,6 +19,7 @@ while ($true) {
         $cmd = $sb.ToString()
         [void]$sb.Clear()
         try {
+            $ErrorActionPreference = 'Stop'
             Invoke-Expression $cmd
         } catch {
             [Console]::Out.WriteLine($_.Exception.Message)
@@ -50,6 +51,7 @@ export class PowerShellSession {
   async runCommand(
     command: string,
     onOutput?: (accumulated: string) => void,
+    timeout?: number,
   ): Promise<{ output: string; error: string }> {
     if (!this.process?.stdin || !this.process?.stdout) {
       throw new Error("PowerShell session not started");
@@ -58,7 +60,7 @@ export class PowerShellSession {
     this.process.stdin.write(command + "\n" + EXEC_MARKER + "\n");
     this.process.stdin.flush();
 
-    const output = await this.readUntilMarker(this.process.stdout, END_MARKER, onOutput);
+    const output = await this.readUntilMarker(this.process.stdout, END_MARKER, onOutput, timeout);
 
     const hasError = output.includes(ERROR_MARKER);
     const cleanOutput = output
@@ -77,11 +79,12 @@ export class PowerShellSession {
     stream: ReadableStream<Uint8Array>,
     marker: string,
     onOutput?: (accumulated: string) => void,
+    timeoutMs = 120_000,
   ): Promise<string> {
     const reader = stream.getReader();
     let accumulated = "";
 
-    try {
+    const readLoop = async () => {
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
@@ -91,19 +94,31 @@ export class PowerShellSession {
         }
         if (accumulated.includes(marker)) break;
       }
+      return accumulated;
+    };
+
+    let timer: ReturnType<typeof setTimeout>;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`PowerShell command timed out after ${timeoutMs / 1000}s`)),
+        timeoutMs,
+      );
+    });
+
+    try {
+      return await Promise.race([readLoop(), timeout]);
     } finally {
+      clearTimeout(timer!);
       reader.releaseLock();
     }
-
-    return accumulated;
   }
 
-  async runCommandJson<T>(command: string): Promise<T> {
+  async runCommandJson<T>(command: string): Promise<T | null> {
     const { output, error } = await this.runCommand(
       `${command} | ConvertTo-Json -Depth 5 -Compress`,
     );
     if (error) throw new Error(error);
-    if (!output) return [] as unknown as T;
+    if (!output) return null;
     return JSON.parse(output) as T;
   }
 

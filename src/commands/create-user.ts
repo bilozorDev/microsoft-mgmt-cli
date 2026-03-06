@@ -2,6 +2,7 @@ import * as p from "@clack/prompts";
 import type { PowerShellSession } from "../powershell.ts";
 import { generatePassword, validatePassword } from "../password.ts";
 import { friendlySkuName } from "../sku-names.ts";
+import { escapePS } from "../utils.ts";
 import { run as addToDistributionGroup } from "./add-to-distribution-group.ts";
 import { run as addToSecurityGroup } from "./add-to-security-group.ts";
 import { run as addToSharedMailbox } from "./add-to-shared-mailbox.ts";
@@ -22,10 +23,6 @@ function suggestUsername(displayName: string): string {
   const parts = displayName.trim().split(/\s+/);
   if (parts.length < 2) return parts[0]!.toLowerCase();
   return `${parts[0]!}.${parts[parts.length - 1]!}`.toLowerCase();
-}
-
-function escapePS(value: string): string {
-  return value.replace(/'/g, "''");
 }
 
 export async function run(ps: PowerShellSession): Promise<void> {
@@ -89,7 +86,7 @@ export async function run(ps: PowerShellSession): Promise<void> {
         const raw = await ps.runCommandJson<AcceptedDomain | AcceptedDomain[]>(
           "Get-AcceptedDomain | Select-Object DomainName, Default",
         );
-        domains = Array.isArray(raw) ? raw : [raw];
+        domains = raw ? (Array.isArray(raw) ? raw : [raw]) : [];
         domainSpin.stop(`Found ${domains.length} domain(s).`);
       } catch (e) {
         domainSpin.stop("Failed to fetch domains.");
@@ -138,7 +135,7 @@ export async function run(ps: PowerShellSession): Promise<void> {
       const raw = await ps.runCommandJson<SubscribedSku | SubscribedSku[]>(
         "Get-MgSubscribedSku | Select-Object SkuId, SkuPartNumber, ConsumedUnits, PrepaidUnits",
       );
-      skus = Array.isArray(raw) ? raw : [raw];
+      skus = raw ? (Array.isArray(raw) ? raw : [raw]) : [];
       licSpin.stop(`Found ${skus.length} license type(s).`);
     } catch (e) {
       licSpin.stop("Failed to fetch licenses.");

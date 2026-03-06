@@ -1,13 +1,10 @@
 import * as p from "@clack/prompts";
 import type { PowerShellSession } from "../powershell.ts";
+import { escapePS } from "../utils.ts";
 
 interface DistributionGroup {
   DisplayName: string;
   PrimarySmtpAddress: string;
-}
-
-function escapePS(value: string): string {
-  return value.replace(/'/g, "''");
 }
 
 export async function run(ps: PowerShellSession, upn: string): Promise<string[]> {
@@ -19,7 +16,7 @@ export async function run(ps: PowerShellSession, upn: string): Promise<string[]>
     const raw = await ps.runCommandJson<DistributionGroup | DistributionGroup[]>(
       "Get-DistributionGroup -ResultSize Unlimited | Select-Object DisplayName, PrimarySmtpAddress",
     );
-    groups = (Array.isArray(raw) ? raw : [raw]).sort((a, b) =>
+    groups = (raw ? (Array.isArray(raw) ? raw : [raw]) : []).sort((a, b) =>
       a.DisplayName.localeCompare(b.DisplayName),
     );
     spin.stop(`Found ${groups.length} distribution group(s).`);

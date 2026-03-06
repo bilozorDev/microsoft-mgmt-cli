@@ -1,13 +1,10 @@
 import * as p from "@clack/prompts";
 import type { PowerShellSession } from "../powershell.ts";
+import { escapePS } from "../utils.ts";
 
 interface SharedMailbox {
   DisplayName: string;
   PrimarySmtpAddress: string;
-}
-
-function escapePS(value: string): string {
-  return value.replace(/'/g, "''");
 }
 
 export async function run(ps: PowerShellSession, upn: string): Promise<string[]> {
@@ -19,7 +16,7 @@ export async function run(ps: PowerShellSession, upn: string): Promise<string[]>
     const raw = await ps.runCommandJson<SharedMailbox | SharedMailbox[]>(
       "Get-Mailbox -RecipientTypeDetails SharedMailbox -ResultSize Unlimited | Select-Object DisplayName, PrimarySmtpAddress",
     );
-    mailboxes = (Array.isArray(raw) ? raw : [raw]).sort((a, b) =>
+    mailboxes = (raw ? (Array.isArray(raw) ? raw : [raw]) : []).sort((a, b) =>
       a.DisplayName.localeCompare(b.DisplayName),
     );
     spin.stop(`Found ${mailboxes.length} shared mailbox(es).`);

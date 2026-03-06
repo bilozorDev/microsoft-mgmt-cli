@@ -1,5 +1,6 @@
 import * as p from "@clack/prompts";
 import type { PowerShellSession } from "../powershell.ts";
+import { escapePS } from "../utils.ts";
 
 function isValidDomain(domain: string): boolean {
   return /^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*\.[a-zA-Z]{2,}$/.test(domain);
@@ -44,7 +45,7 @@ export async function run(ps: PowerShellSession): Promise<void> {
 
   for (const domain of domains) {
     const { error } = await ps.runCommand(
-      `Set-HostedContentFilterPolicy -Identity "Default" -AllowedSenderDomains @{Add="${domain}"}`
+      `Set-HostedContentFilterPolicy -Identity 'Default' -AllowedSenderDomains @{Add='${escapePS(domain)}'}`
     );
     results.push({ domain, success: !error, error: error || undefined });
   }

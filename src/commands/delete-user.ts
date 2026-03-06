@@ -1,6 +1,7 @@
 import * as p from "@clack/prompts";
 import type { PowerShellSession } from "../powershell.ts";
 import { friendlySkuName } from "../sku-names.ts";
+import { escapePS } from "../utils.ts";
 
 interface MgUser {
   DisplayName: string;
@@ -34,10 +35,6 @@ interface SecGroupMembership {
   MemberCount: number;
 }
 
-function escapePS(value: string): string {
-  return value.replace(/'/g, "''");
-}
-
 function formatStorageSize(mb: number): string {
   if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`;
   return `${mb} MB`;
@@ -59,7 +56,7 @@ async function fetchUsers(
     const raw = await ps.runCommandJson<MgUser | MgUser[]>(
       "Get-MgUser -All -Property DisplayName,UserPrincipalName,Id | Select-Object DisplayName,UserPrincipalName,Id",
     );
-    users = Array.isArray(raw) ? raw : [raw];
+    users = raw ? (Array.isArray(raw) ? raw : [raw]) : [];
   } else {
     // Search mode for large tenants
     while (true) {
@@ -76,7 +73,7 @@ async function fetchUsers(
         const raw = await ps.runCommandJson<MgUser | MgUser[]>(
           `Get-MgUser -Search '"displayName:${escapePS(query)}"' -ConsistencyLevel eventual -Property DisplayName,UserPrincipalName,Id | Select-Object DisplayName,UserPrincipalName,Id`,
         );
-        users = Array.isArray(raw) ? raw : [raw];
+        users = raw ? (Array.isArray(raw) ? raw : [raw]) : [];
         searchSpin.stop(`Found ${users.length} user(s).`);
       } catch {
         searchSpin.stop("Search returned no results.");
@@ -171,7 +168,7 @@ export async function run(ps: PowerShellSession): Promise<void> {
     const raw = await ps.runCommandJson<LicenseDetail | LicenseDetail[]>(
       `Get-MgUserLicenseDetail -UserId '${escapePS(userId)}' | Select-Object SkuPartNumber, SkuId`,
     );
-    licenses = Array.isArray(raw) ? raw : [raw];
+    licenses = raw ? (Array.isArray(raw) ? raw : [raw]) : [];
     licSpin.stop("User details loaded.");
   } catch {
     licSpin.stop("User details loaded.");
@@ -388,7 +385,7 @@ Get-Mailbox -RecipientTypeDetails SharedMailbox -ResultSize Unlimited | ForEach-
   }
 }`,
       );
-      sharedMailboxPerms = Array.isArray(raw) ? raw : [raw];
+      sharedMailboxPerms = raw ? (Array.isArray(raw) ? raw : [raw]) : [];
       scanMbSpin.stop(
         `Found permissions on ${sharedMailboxPerms.length} shared mailbox(es).`,
       );
@@ -414,7 +411,7 @@ Get-Mailbox -RecipientTypeDetails SharedMailbox -ResultSize Unlimited | ForEach-
   }
 }`,
       );
-      distGroupMemberships = Array.isArray(raw) ? raw : [raw];
+      distGroupMemberships = raw ? (Array.isArray(raw) ? raw : [raw]) : [];
       scanDgSpin.stop(
         `Found ${distGroupMemberships.length} distribution group membership(s).`,
       );
@@ -437,7 +434,7 @@ Get-Mailbox -RecipientTypeDetails SharedMailbox -ResultSize Unlimited | ForEach-
   }
 }`,
       );
-      secGroupMemberships = Array.isArray(raw) ? raw : [raw];
+      secGroupMemberships = raw ? (Array.isArray(raw) ? raw : [raw]) : [];
       scanSgSpin.stop(
         `Found ${secGroupMemberships.length} security group membership(s).`,
       );

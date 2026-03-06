@@ -1,4 +1,4 @@
-import { randomBytes } from "crypto";
+import { randomInt } from "crypto";
 
 const UPPERCASE = "ABCDEFGHJKLMNPQRSTUVWXYZ";
 const LOWERCASE = "abcdefghjkmnpqrstuvwxyz";
@@ -35,8 +35,7 @@ function pick(charset: string): string {
 }
 
 function cryptoRandomInt(max: number): number {
-  const bytes = randomBytes(4);
-  return bytes.readUInt32BE(0) % max;
+  return randomInt(max);
 }
 
 export function validatePassword(pw: string): string | undefined {

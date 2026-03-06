@@ -1,14 +1,11 @@
 import * as p from "@clack/prompts";
 import type { PowerShellSession } from "../powershell.ts";
+import { escapePS } from "../utils.ts";
 
 interface SecurityGroup {
   DisplayName: string;
   Id: string;
   Mail: string | null;
-}
-
-function escapePS(value: string): string {
-  return value.replace(/'/g, "''");
 }
 
 export async function run(ps: PowerShellSession, upn: string): Promise<string | null> {
@@ -32,7 +29,7 @@ export async function run(ps: PowerShellSession, upn: string): Promise<string | 
     const raw = await ps.runCommandJson<SecurityGroup | SecurityGroup[]>(
       'Get-MgGroup -Filter "securityEnabled eq true" -All | Select-Object DisplayName, Id, Mail',
     );
-    groups = (Array.isArray(raw) ? raw : [raw]).sort((a, b) =>
+    groups = (raw ? (Array.isArray(raw) ? raw : [raw]) : []).sort((a, b) =>
       a.DisplayName.localeCompare(b.DisplayName),
     );
     spin.stop(`Found ${groups.length} security group(s).`);
