@@ -299,24 +299,16 @@ export async function run(ps: PowerShellSession): Promise<void> {
 
   const otsSpin = p.spinner();
   otsSpin.start("Creating one-time secret link...");
-  const secretLink = await createSecretLink(
+  const otsResult = await createSecretLink(
     `Username: ${upn}\nPassword: ${password}`,
   );
-  if (secretLink) {
+  const otsUrl = "url" in otsResult ? otsResult.url : null;
+  if (otsUrl) {
     otsSpin.stop("One-time secret link created.");
-    try {
-      if (process.platform === "win32") {
-        await ps.runCommand(`Set-Clipboard -Value '${escapePS(secretLink)}'`);
-      } else {
-        const proc = Bun.spawn(["pbcopy"], { stdin: new Blob([secretLink]) });
-        await proc.exited;
-      }
-      p.log.success(`Copied to clipboard: ${secretLink}`);
-    } catch {
-      p.log.info(`Secret link: ${secretLink}`);
-    }
+    p.log.info(`Secret link: ${otsUrl}`);
   } else {
     otsSpin.stop("Failed to create one-time secret link.");
+    p.log.error(otsResult.error);
   }
 
   p.log.success("User created successfully.");
@@ -352,14 +344,20 @@ export async function run(ps: PowerShellSession): Promise<void> {
   const addedMailboxes: string[] = [];
 
   while (true) {
+    const menuOptions: { value: string; label: string }[] = [
+      { value: "distribution-group", label: "Distribution group" },
+      { value: "security-group", label: "Security group" },
+      { value: "shared-mailbox", label: "Shared mailbox" },
+    ];
+    if (otsUrl) {
+      menuOptions.push({ value: "copy-ots", label: "Copy OTS link to clipboard" });
+      menuOptions.push({ value: "copy-ticket", label: "Copy ticket update note to clipboard" });
+    }
+    menuOptions.push({ value: "done", label: "Done" });
+
     const action = await p.select({
       message: "Add user to...",
-      options: [
-        { value: "distribution-group", label: "Distribution group" },
-        { value: "security-group", label: "Security group" },
-        { value: "shared-mailbox", label: "Shared mailbox" },
-        { value: "done", label: "Done" },
-      ],
+      options: menuOptions,
     });
     if (p.isCancel(action) || action === "done") break;
 
@@ -377,6 +375,45 @@ export async function run(ps: PowerShellSession): Promise<void> {
       case "shared-mailbox": {
         const names = await addToSharedMailbox(ps, upn);
         addedMailboxes.push(...names);
+        break;
+      }
+      case "copy-ots": {
+        try {
+          if (process.platform === "win32") {
+            await ps.runCommand(`Set-Clipboard -Value '${escapePS(otsUrl!)}'`);
+          } else {
+            const proc = Bun.spawn(["pbcopy"], { stdin: new Blob([otsUrl!]) });
+            await proc.exited;
+          }
+          p.log.success(`Copied to clipboard: ${otsUrl}`);
+        } catch {
+          p.log.info(`Secret link: ${otsUrl}`);
+        }
+        break;
+      }
+      case "copy-ticket": {
+        const groupParts: string[] = [];
+        if (addedDistGroups.length > 0) groupParts.push(`distribution group(s): ${addedDistGroups.join(", ")}`);
+        if (addedSecGroups.length > 0) groupParts.push(`security group(s): ${addedSecGroups.join(", ")}`);
+        if (addedMailboxes.length > 0) groupParts.push(`shared mailbox(es): ${addedMailboxes.join(", ")}`);
+
+        let ticketNote = `Created mailbox for ${displayName} - ${upn}.`;
+        if (groupParts.length > 0) {
+          ticketNote += ` Added to ${groupParts.join(", ")}.`;
+        }
+        ticketNote += ` You can retrieve credentials via this link: ${otsUrl} — make sure to save it since it's a one-time link and it will expire in 7 days.`;
+
+        try {
+          if (process.platform === "win32") {
+            await ps.runCommand(`Set-Clipboard -Value '${escapePS(ticketNote)}'`);
+          } else {
+            const proc = Bun.spawn(["pbcopy"], { stdin: new Blob([ticketNote]) });
+            await proc.exited;
+          }
+          p.log.success("Ticket update note copied to clipboard.");
+        } catch {
+          p.log.info(ticketNote);
+        }
         break;
       }
     }

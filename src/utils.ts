@@ -13,24 +13,24 @@ export function escapePS(value: string): string {
 
 /**
  * Creates a one-time secret link via onetimesecret.com (anonymous, no auth needed).
- * Returns the shareable URL or null on failure.
+ * Returns `{ url }` on success or `{ error }` with a diagnostic message on failure.
  */
 export async function createSecretLink(
   secret: string,
   ttl: number = 604800,
-): Promise<string | null> {
+): Promise<{ url: string } | { error: string }> {
   try {
-    const res = await fetch("https://us.onetimesecret.com/api/v1/share", {
+    const res = await fetch("https://eu.onetimesecret.com/api/v1/share", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({ secret, ttl: String(ttl) }),
     });
-    if (!res.ok) return null;
+    if (!res.ok) return { error: `API returned HTTP ${res.status} ${res.statusText}` };
     const data = (await res.json()) as { secret_key?: string };
-    if (!data.secret_key) return null;
-    return `https://us.onetimesecret.com/secret/${data.secret_key}`;
-  } catch {
-    return null;
+    if (!data.secret_key) return { error: "API response missing secret_key" };
+    return { url: `https://eu.onetimesecret.com/secret/${data.secret_key}` };
+  } catch (e) {
+    return { error: `${e instanceof Error ? e.message : e}` };
   }
 }
 
