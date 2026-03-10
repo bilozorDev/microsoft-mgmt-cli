@@ -6,7 +6,7 @@
 
 - [ ] **Distribution Group Audit** — All distribution groups with member counts, owners, email addresses. Flags empty groups and groups with only one member. (`Get-DistributionGroup` + `Get-DistributionGroupMember`)
 
-- [ ] **Mailbox Forwarding Audit** — Users with forwarding rules, SMTP forwarding, or inbox rules that forward externally. Major security/compliance concern. (`Get-Mailbox -Properties ForwardingSmtpAddress,ForwardingAddress,DeliverToMailboxAndForward` + `Get-InboxRule`)
+- [x] **Mailbox Forwarding Audit** — Users with forwarding rules, SMTP forwarding, or inbox rules that forward externally. Major security/compliance concern. (`Get-Mailbox -Properties ForwardingSmtpAddress,ForwardingAddress,DeliverToMailboxAndForward` + `Get-InboxRule`)
 
 - [ ] **Guest User Audit** — All external/guest users (#EXT#), when created, last sign-in, which groups they belong to. Common compliance requirement. (Graph `Get-MgUser -Filter "userType eq 'Guest'"` + sign-in activity)
 
