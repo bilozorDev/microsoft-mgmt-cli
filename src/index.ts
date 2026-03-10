@@ -7,6 +7,7 @@ import { run as editUser } from "./commands/edit-user.ts";
 import { run as deleteUser } from "./commands/delete-user.ts";
 import { run as inactiveUsers } from "./commands/inactive-users.ts";
 import { run as sharedMailboxes } from "./commands/shared-mailboxes.ts";
+import { checkForUpdates } from "./auto-update.ts";
 
 const ps = new PowerShellSession();
 
@@ -24,6 +25,7 @@ async function main() {
   p.intro("Profulgent — Exchange Online Admin CLI");
 
   await checkRequirements();
+  await checkForUpdates();
 
   // Start PowerShell session
   const connectSpin = p.spinner();
