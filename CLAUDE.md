@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - `bun install` — install dependencies
 - `bun run start` — run the CLI (`bun run src/index.ts`)
-- `bun run build:windows` — compile Windows exe to `dist/profulgent.exe`
+- `bun run build:windows` — compile Windows exe to `dist/Microsoft 365 Admin CLI/m365-admin.exe`
 
 No test framework or build step configured — Bun runs TypeScript directly.
 
@@ -33,9 +33,10 @@ Key methods:
 ### Startup flow (`src/index.ts`)
 
 1. `checkRequirements()` — verifies `pwsh`, ExchangeOnlineManagement, Microsoft.Graph are installed; offers auto-install
-2. Start persistent PowerShell session
-3. `Connect-ExchangeOnline` (opens browser for auth)
-4. Menu loop with category submenus (User Management, Spam Management, Reports)
+2. `checkForUpdates()` — auto-update from GitHub Releases (compiled `.exe` only; skipped in dev)
+3. Start persistent PowerShell session
+4. `Connect-ExchangeOnline` (opens browser for auth)
+5. Menu loop with category submenus (User Management, Spam Management, Reports)
 
 ### Commands (`src/commands/`)
 
@@ -66,7 +67,7 @@ const buffer = await generateReport({
 await Bun.write(fullPath, buffer);
 ```
 
-The template handles: logo (`src/assets/logo.png`), title/tenant/date/summary header rows, contact info (`Profulgent · Helpdesk +1 732 242 9345 · support@profulgent.net`), blue divider, styled table headers (#2B5797 background), and alternating row fills (#E8EDF2). To change branding (phone, logo, colors), edit `src/report-template.ts` once — all reports inherit the change.
+The template handles: title/tenant/date/summary header rows starting at column A, blue divider, styled table headers (#2B5797 background), and alternating row fills (#E8EDF2). To change styling, edit `src/report-template.ts` once — all reports inherit the change.
 
 ### When to use PowerShell vs Graph API
 
@@ -90,6 +91,20 @@ The template handles: logo (`src/assets/logo.png`), title/tenant/date/summary he
 
 `createSecretLink(secret, ttl)` calls the onetimesecret.com API (anonymous, no auth) to create a self-destructing link. Used after user creation to share credentials securely. Default TTL is 7 days.
 
+### Auto-update (`src/auto-update.ts`)
+
+Checks GitHub Releases for `bilozorDev/microsoft-mgmt-cli` on startup. Only runs when `process.execPath` ends with `.exe` (compiled binary). Downloads the `.zip` asset, extracts via `pwsh Expand-Archive`, renames the running exe to `.old` (Windows allows rename but not overwrite of a running exe), copies the new `m365-admin.exe`, then exits for restart. Network/API errors are caught silently so the app always starts.
+
+### Versioning and releases
+
+The `version` field in `package.json` is the source of truth — Bun inlines it at compile time via `import pkg from "../package.json"`. To ship a new release:
+
+1. Bump `version` in `package.json`
+2. `bun run build:windows`
+3. `gh release create v<version> "dist/Microsoft 365 Admin CLI.zip" --title "v<version>" --notes "..."`
+
+The auto-updater compares `tag_name` (stripped of leading `v`) against the compiled-in version.
+
 ### Helper commands (`src/commands/add-to-*.ts`)
 
 Reusable membership helpers called from create-user, edit-user, and delete-user. They accept an optional `upn` parameter — when provided, they skip the user-selection prompt and operate on that UPN directly.
@@ -101,7 +116,7 @@ The app runs on macOS via `bun run start` and ships as a Windows exe via `bun ru
 - **Clipboard:** use `Set-Clipboard` via the PowerShell session on Windows, `pbcopy` via `Bun.spawn` on macOS
 - **Open folder:** `explorer` on Windows, `open` on macOS — always wrap in `try/catch`
 - **File paths:** use Node's `path.join()`/`path.resolve()` (platform-aware); never hardcode `/` or `\`
-- **Asset embedding:** `import.meta.dir` and `import.meta.url` don't resolve to filesystem paths in compiled Bun binaries. Use `fileURLToPath(new URL("...", import.meta.url))` and read assets into buffers at module load time.
+- **Asset embedding:** `import.meta.dir` and `import.meta.url` don't resolve to filesystem paths in compiled Bun binaries. Use `fileURLToPath(new URL("...", import.meta.url))` and read assets into buffers at module load time. (Currently no bundled assets.)
 - **Report saving:** always call `mkdirSync(dirname(fullPath), { recursive: true })` before `Bun.write()` to ensure parent directories exist
 - **Signals:** `SIGTERM` is not supported on Windows; `SIGINT` (Ctrl+C) works on both
 - **PowerShell:** requires `pwsh` (PowerShell Core 7+), not the built-in Windows PowerShell 5.1 (`powershell.exe`)

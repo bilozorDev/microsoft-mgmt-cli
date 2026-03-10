@@ -1,5 +1,5 @@
 import * as p from "@clack/prompts";
-import { dirname, join, basename } from "path";
+import { dirname, join } from "path";
 import { mkdirSync, rmSync, renameSync, copyFileSync } from "fs";
 import { tmpdir } from "os";
 import { appDir } from "./utils.ts";
@@ -61,7 +61,7 @@ export async function checkForUpdates(): Promise<void> {
   const spin = p.spinner();
   spin.start("Downloading update...");
 
-  const tempDir = join(tmpdir(), `profulgent-update-${Date.now()}`);
+  const tempDir = join(tmpdir(), `m365-update-${Date.now()}`);
   const tempZip = join(tempDir, "update.zip");
   const extractDir = join(tempDir, "extracted");
 
@@ -98,12 +98,11 @@ export async function checkForUpdates(): Promise<void> {
     const exeDir = appDir();
     const currentExe = process.execPath;
 
-    // Walk extracted dir to find profulgent.exe and logo.png
-    const newExe = findFile(extractDir, "profulgent.exe");
-    const newLogo = findFile(extractDir, "logo.png");
+    // Walk extracted dir to find m365-admin.exe
+    const newExe = findFile(extractDir, "m365-admin.exe");
 
     if (!newExe) {
-      spin.stop("Update package missing profulgent.exe.");
+      spin.stop("Update package missing m365-admin.exe.");
       p.log.warn("Invalid update package. Continuing with current version.");
       rmSync(tempDir, { recursive: true, force: true });
       return;
@@ -114,10 +113,7 @@ export async function checkForUpdates(): Promise<void> {
     renameSync(currentExe, oldExe);
 
     // Copy new files
-    copyFileSync(newExe, join(exeDir, "profulgent.exe"));
-    if (newLogo) {
-      copyFileSync(newLogo, join(exeDir, "logo.png"));
-    }
+    copyFileSync(newExe, join(exeDir, "m365-admin.exe"));
 
     // Cleanup
     rmSync(tempDir, { recursive: true, force: true });

@@ -1,30 +1,4 @@
-import { dirname, join } from "path";
 import ExcelJS from "exceljs";
-
-// Load logo lazily — cached after first call, skipped if unavailable
-let logoCache: ArrayBuffer | null | undefined;
-async function loadLogo(): Promise<ArrayBuffer | null> {
-  if (logoCache !== undefined) return logoCache;
-  try {
-    // In compiled binary: look next to the exe. In dev: use source assets.
-    const exeDir = dirname(process.execPath);
-    const candidates = [
-      join(exeDir, "logo.png"),
-      new URL("assets/logo.png", import.meta.url),
-    ];
-    for (const path of candidates) {
-      const file = Bun.file(path);
-      if (await file.exists()) {
-        logoCache = await file.arrayBuffer();
-        return logoCache;
-      }
-    }
-    logoCache = null;
-  } catch {
-    logoCache = null;
-  }
-  return logoCache;
-}
 
 function colLetter(n: number): string {
   return String.fromCharCode(64 + n);
@@ -40,10 +14,10 @@ export interface ReportOptions {
 }
 
 /**
- * Generates a branded Excel workbook matching the Profulgent report template.
- * Layout: logo (cols A-B rows 1-4), title (C1), company (C2), date (C3),
- * summary (C4), contact (row 6), divider (row 7), table header (row 9),
- * data (row 10+).
+ * Generates a styled Excel workbook for M365 admin reports.
+ * Layout: title (A1), company (A2), date/summary (A3-A4),
+ * divider (row 3 bottom), spacer (row 4), table header (row 5),
+ * data (row 6+).
  */
 export async function generateReport(opts: ReportOptions): Promise<Buffer> {
   const { sheetName, title, tenant, summary, columns, rows } = opts;
@@ -58,66 +32,43 @@ export async function generateReport(opts: ReportOptions): Promise<Buffer> {
   // Column widths
   ws.columns = columns.map((c) => ({ width: c.width }));
 
-  // --- Logo (cols A-B, rows 1-4) ---
-  const logo = await loadLogo();
-  if (logo) {
-    const logoId = wb.addImage({
-      buffer: logo,
-      extension: "png",
-    });
-    ws.addImage(logoId, {
-      tl: { col: 0, row: 0 } as any,
-      br: { col: 2, row: 4 } as any,
-    });
-  }
-
   // --- Title (row 1) ---
-  ws.mergeCells(`C1:${lastCol}1`);
-  const titleCell = ws.getCell("C1");
+  ws.mergeCells(`A1:${lastCol}1`);
+  const titleCell = ws.getCell("A1");
   titleCell.value = title;
   titleCell.font = { size: 18, bold: true, color: { argb: "FF1B3A5C" } };
   titleCell.alignment = { vertical: "middle" };
 
   // --- Company name (row 2) ---
-  ws.mergeCells(`C2:${lastCol}2`);
-  ws.getCell("C2").value = tenant;
-  ws.getCell("C2").font = { size: 11, color: { argb: "FF666666" } };
+  ws.mergeCells(`A2:${lastCol}2`);
+  ws.getCell("A2").value = tenant;
+  ws.getCell("A2").font = { size: 11, color: { argb: "FF666666" } };
 
   // --- Date (row 3) ---
-  ws.mergeCells(`C3:${lastCol}3`);
+  ws.mergeCells(`A3:${lastCol}3`);
   const reportDate = new Date().toLocaleDateString("en-US", {
     year: "numeric",
     month: "long",
     day: "numeric",
   });
-  ws.getCell("C3").value = `Report generated: ${reportDate}`;
-  ws.getCell("C3").font = { size: 11, color: { argb: "FF666666" } };
+  const dateCell = ws.getCell("A3");
+  dateCell.value = `Report generated: ${reportDate}`;
+  dateCell.font = { size: 11, color: { argb: "FF666666" } };
 
-  // --- Summary (row 4) ---
-  ws.mergeCells(`C4:${lastCol}4`);
-  ws.getCell("C4").value = summary;
-  ws.getCell("C4").font = { size: 11, italic: true, color: { argb: "FF666666" } };
-
-  // --- Row 5: spacer ---
-
-  // --- Contact info (row 6) ---
-  ws.mergeCells(`A6:${lastCol}6`);
-  ws.getCell("A6").value =
-    "Profulgent · Helpdesk +1 732 242 9345 · support@profulgent.net";
-  ws.getCell("A6").font = { size: 9, color: { argb: "FF999999" } };
-  ws.getCell("A6").alignment = { horizontal: "center" };
-
-  // --- Divider (row 7) ---
+  // --- Divider (row 3 bottom border) ---
   for (let col = 1; col <= colCount; col++) {
-    ws.getCell(7, col).border = {
+    ws.getCell(3, col).border = {
       bottom: { style: "medium", color: { argb: "FF2B5797" } },
     };
   }
 
-  // --- Row 8: spacer ---
+  // --- Summary (row 4) ---
+  ws.mergeCells(`A4:${lastCol}4`);
+  ws.getCell("A4").value = summary;
+  ws.getCell("A4").font = { size: 11, italic: true, color: { argb: "FF666666" } };
 
-  // --- Table header (row 9) ---
-  const headerRow = ws.getRow(9);
+  // --- Table header (row 5) ---
+  const headerRow = ws.getRow(5);
   columns.forEach((c, i) => {
     const cell = headerRow.getCell(i + 1);
     cell.value = c.header;
@@ -136,7 +87,7 @@ export async function generateReport(opts: ReportOptions): Promise<Buffer> {
     };
   });
 
-  // --- Data rows (row 10+) ---
+  // --- Data rows (row 6+) ---
   const thinBorder: Partial<ExcelJS.Borders> = {
     top: { style: "thin", color: { argb: "FFB0B0B0" } },
     bottom: { style: "thin", color: { argb: "FFB0B0B0" } },
@@ -155,7 +106,7 @@ export async function generateReport(opts: ReportOptions): Promise<Buffer> {
   };
 
   rows.forEach((values, idx) => {
-    const row = ws.getRow(10 + idx);
+    const row = ws.getRow(6 + idx);
     values.forEach((v, ci) => {
       const cell = row.getCell(ci + 1);
       cell.value = v;

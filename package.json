@@ -1,12 +1,12 @@
 {
-  "name": "profulgent",
+  "name": "m365-admin-cli",
   "version": "1.0.0",
   "module": "src/index.ts",
   "type": "module",
   "private": true,
   "scripts": {
     "start": "bun run src/index.ts",
-    "build:windows": "bun build --compile --target=bun-windows-x64 src/index.ts --outfile \"dist/Profulgent Microsoft Script/profulgent.exe\" && cp src/assets/logo.png \"dist/Profulgent Microsoft Script/logo.png\" && cd dist && zip -r -9 \"Profulgent Microsoft Script.zip\" \"Profulgent Microsoft Script\""
+    "build:windows": "bun build --compile --target=bun-windows-x64 src/index.ts --outfile \"dist/Microsoft 365 Admin CLI/m365-admin.exe\" && cd dist && zip -r -9 \"Microsoft 365 Admin CLI.zip\" \"Microsoft 365 Admin CLI\""
   },
   "devDependencies": {
     "@types/bun": "latest"

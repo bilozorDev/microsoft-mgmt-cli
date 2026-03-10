@@ -22,7 +22,7 @@ process.on("SIGINT", () => void cleanup());
 process.on("SIGTERM", () => void cleanup());
 
 async function main() {
-  p.intro("Profulgent — Exchange Online Admin CLI");
+  p.intro("Microsoft 365 Admin CLI");
 
   await checkRequirements();
   await checkForUpdates();
