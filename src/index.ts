@@ -8,6 +8,9 @@ import { run as deleteUser } from "./commands/delete-user.ts";
 import { run as inactiveUsers } from "./commands/inactive-users.ts";
 import { run as sharedMailboxes } from "./commands/shared-mailboxes.ts";
 import { run as forwardingAudit } from "./commands/forwarding-audit.ts";
+import { run as createGroup } from "./commands/create-group.ts";
+import { run as editGroup } from "./commands/edit-group.ts";
+import { run as deleteGroup } from "./commands/delete-group.ts";
 import { checkForUpdates } from "./auto-update.ts";
 
 const ps = new PowerShellSession();
@@ -67,6 +70,7 @@ async function main() {
       message: "What would you like to do?",
       options: [
         { value: "user-management", label: "User Management" },
+        { value: "group-management", label: "Groups & Shared Mailbox Management" },
         { value: "spam-management", label: "Spam Management" },
         { value: "reports", label: "Reports" },
         { value: "switch-tenant", label: "Switch tenant", hint: ps.tenantDomain ? `connected to ${ps.tenantDomain}` : undefined },
@@ -141,6 +145,32 @@ async function main() {
           break;
         case "forwarding-audit":
           await forwardingAudit(ps);
+          break;
+      }
+    }
+
+    if (category === "group-management") {
+      const action = await p.select({
+        message: "Groups & Shared Mailbox Management",
+        options: [
+          { value: "create-group", label: "Create group or shared mailbox" },
+          { value: "edit-group", label: "Edit group or shared mailbox" },
+          { value: "delete-group", label: "Delete group or shared mailbox" },
+          { value: "back", label: "Back" },
+        ],
+      });
+
+      if (p.isCancel(action) || action === "back") continue;
+
+      switch (action) {
+        case "create-group":
+          await createGroup(ps);
+          break;
+        case "edit-group":
+          await editGroup(ps);
+          break;
+        case "delete-group":
+          await deleteGroup(ps);
           break;
       }
     }
