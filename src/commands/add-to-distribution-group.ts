@@ -7,7 +7,7 @@ interface DistributionGroup {
   PrimarySmtpAddress: string;
 }
 
-export async function run(ps: PowerShellSession, upn: string): Promise<string[]> {
+export async function run(ps: PowerShellSession, upn: string): Promise<{ name: string; email: string }[]> {
   const spin = p.spinner();
   spin.start("Fetching distribution groups...");
 
@@ -42,7 +42,7 @@ export async function run(ps: PowerShellSession, upn: string): Promise<string[]>
   });
   if (p.isCancel(selectedAddresses)) return [];
 
-  const added: string[] = [];
+  const added: { name: string; email: string }[] = [];
 
   for (const address of selectedAddresses) {
     const name = groups.find((g) => g.PrimarySmtpAddress === address)?.DisplayName ?? address;
@@ -59,7 +59,7 @@ export async function run(ps: PowerShellSession, upn: string): Promise<string[]>
       p.log.error(error);
     } else {
       addSpin.stop(`Added ${upn} to ${name}.`);
-      added.push(name);
+      added.push({ name, email: address });
     }
   }
 

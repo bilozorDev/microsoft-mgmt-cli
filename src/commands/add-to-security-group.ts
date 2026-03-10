@@ -8,7 +8,7 @@ interface SecurityGroup {
   Mail: string | null;
 }
 
-export async function run(ps: PowerShellSession, upn: string): Promise<string | null> {
+export async function run(ps: PowerShellSession, upn: string): Promise<{ name: string; email: string } | null> {
   // Ensure Graph connected
   const graphSpin = p.spinner();
   graphSpin.start("Connecting to Microsoft Graph...");
@@ -55,7 +55,8 @@ export async function run(ps: PowerShellSession, upn: string): Promise<string | 
   if (p.isCancel(groupId)) return null;
 
   const addSpin = p.spinner();
-  const groupName = groups.find((g) => g.Id === groupId)?.DisplayName ?? groupId;
+  const group = groups.find((g) => g.Id === groupId);
+  const groupName = group?.DisplayName ?? groupId;
   addSpin.start(`Adding ${upn} to ${groupName}...`);
 
   const { error } = await ps.runCommand(
@@ -69,5 +70,5 @@ export async function run(ps: PowerShellSession, upn: string): Promise<string | 
   }
 
   addSpin.stop(`Added ${upn} to ${groupName}.`);
-  return groupName;
+  return { name: groupName, email: group?.Mail ?? "" };
 }

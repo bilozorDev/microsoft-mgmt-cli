@@ -300,7 +300,7 @@ export async function run(ps: PowerShellSession): Promise<void> {
   const otsSpin = p.spinner();
   otsSpin.start("Creating one-time secret link...");
   const otsResult = await createSecretLink(
-    `Username: ${upn}\nPassword: ${password}`,
+    `${password}`,
   );
   const otsUrl = "url" in otsResult ? otsResult.url : null;
   if (otsUrl) {
@@ -308,7 +308,7 @@ export async function run(ps: PowerShellSession): Promise<void> {
     p.log.info(`Secret link: ${otsUrl}`);
   } else {
     otsSpin.stop("Failed to create one-time secret link.");
-    p.log.error(otsResult.error);
+    p.log.error("error" in otsResult ? otsResult.error : "Unknown error");
   }
 
   p.log.success("User created successfully.");
@@ -339,9 +339,9 @@ export async function run(ps: PowerShellSession): Promise<void> {
   }
 
   // 13. Post-creation membership setup
-  const addedDistGroups: string[] = [];
-  const addedSecGroups: string[] = [];
-  const addedMailboxes: string[] = [];
+  const addedDistGroups: { name: string; email: string }[] = [];
+  const addedSecGroups: { name: string; email: string }[] = [];
+  const addedMailboxes: { name: string; email: string }[] = [];
 
   while (true) {
     const menuOptions: { value: string; label: string }[] = [
@@ -363,18 +363,18 @@ export async function run(ps: PowerShellSession): Promise<void> {
 
     switch (action) {
       case "distribution-group": {
-        const names = await addToDistributionGroup(ps, upn);
-        addedDistGroups.push(...names);
+        const items = await addToDistributionGroup(ps, upn);
+        addedDistGroups.push(...items);
         break;
       }
       case "security-group": {
-        const name = await addToSecurityGroup(ps, upn);
-        if (name) addedSecGroups.push(name);
+        const item = await addToSecurityGroup(ps, upn);
+        if (item) addedSecGroups.push(item);
         break;
       }
       case "shared-mailbox": {
-        const names = await addToSharedMailbox(ps, upn);
-        addedMailboxes.push(...names);
+        const items = await addToSharedMailbox(ps, upn);
+        addedMailboxes.push(...items);
         break;
       }
       case "copy-ots": {
@@ -392,16 +392,20 @@ export async function run(ps: PowerShellSession): Promise<void> {
         break;
       }
       case "copy-ticket": {
-        const groupParts: string[] = [];
-        if (addedDistGroups.length > 0) groupParts.push(`distribution group(s): ${addedDistGroups.join(", ")}`);
-        if (addedSecGroups.length > 0) groupParts.push(`security group(s): ${addedSecGroups.join(", ")}`);
-        if (addedMailboxes.length > 0) groupParts.push(`shared mailbox(es): ${addedMailboxes.join(", ")}`);
+        const formatItem = (g: { name: string; email: string }) =>
+          g.email ? `${g.name} - ${g.email}` : g.name;
 
-        let ticketNote = `Created mailbox for ${displayName} - ${upn}.`;
-        if (groupParts.length > 0) {
-          ticketNote += ` Added to ${groupParts.join(", ")}.`;
+        let ticketNote = `Created mailbox for ${displayName} (${upn}).`;
+
+        const allGroups: string[] = [];
+        for (const g of addedDistGroups) allGroups.push(formatItem(g));
+        for (const g of addedSecGroups) allGroups.push(formatItem(g));
+        for (const g of addedMailboxes) allGroups.push(formatItem(g));
+        if (allGroups.length > 0) {
+          ticketNote += `\nAdded to group(s):\n${allGroups.map((g) => `  - ${g}`).join("\n")}`;
         }
-        ticketNote += ` You can retrieve credentials via this link: ${otsUrl} — make sure to save it since it's a one-time link and it will expire in 7 days.`;
+
+        ticketNote += `\n\nYou can retrieve credentials via this link: ${otsUrl}\nMake sure to save it since it's a one-time link and it will expire in 7 days.`;
 
         try {
           if (process.platform === "win32") {
@@ -422,13 +426,13 @@ export async function run(ps: PowerShellSession): Promise<void> {
   // 14. Summary
   const parts = [`Created user ${upn}`];
   if (addedDistGroups.length > 0) {
-    parts.push(`Distribution group(s): ${addedDistGroups.join(", ")}`);
+    parts.push(`Distribution group(s): ${addedDistGroups.map((g) => g.name).join(", ")}`);
   }
   if (addedSecGroups.length > 0) {
-    parts.push(`Security group(s): ${addedSecGroups.join(", ")}`);
+    parts.push(`Security group(s): ${addedSecGroups.map((g) => g.name).join(", ")}`);
   }
   if (addedMailboxes.length > 0) {
-    parts.push(`Shared mailbox(es): ${addedMailboxes.join(", ")}`);
+    parts.push(`Shared mailbox(es): ${addedMailboxes.map((g) => g.name).join(", ")}`);
   }
 
   p.note(parts.join("\n"), "Summary");

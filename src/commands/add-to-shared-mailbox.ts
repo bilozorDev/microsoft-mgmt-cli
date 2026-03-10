@@ -7,7 +7,7 @@ interface SharedMailbox {
   PrimarySmtpAddress: string;
 }
 
-export async function run(ps: PowerShellSession, upn: string): Promise<string[]> {
+export async function run(ps: PowerShellSession, upn: string): Promise<{ name: string; email: string }[]> {
   const spin = p.spinner();
   spin.start("Fetching shared mailboxes...");
 
@@ -76,7 +76,7 @@ export async function run(ps: PowerShellSession, upn: string): Promise<string[]>
     "send-on-behalf": "Send on Behalf",
   };
   const permsSummary = permissions.map((p) => permLabels[p]).join(", ");
-  const added: string[] = [];
+  const added: { name: string; email: string }[] = [];
 
   for (const mailbox of selectedAddresses) {
     const name = mailboxes.find((m) => m.PrimarySmtpAddress === mailbox)?.DisplayName ?? mailbox;
@@ -109,10 +109,10 @@ export async function run(ps: PowerShellSession, upn: string): Promise<string[]>
 
     if (errors.length === 0) {
       spin.stop(`${name}: granted ${permsSummary}.`);
-      added.push(name);
+      added.push({ name, email: mailbox });
     } else if (errors.length < permissions.length) {
       spin.stop(`${name}: some permissions failed.`);
-      added.push(name);
+      added.push({ name, email: mailbox });
       for (const err of errors) p.log.error(err);
     } else {
       spin.stop(`${name}: failed to grant permissions.`);

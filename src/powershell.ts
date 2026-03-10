@@ -124,7 +124,7 @@ export class PowerShellSession {
   async ensureGraphConnected(): Promise<void> {
     if (this.graphConnected) return;
     const { error } = await this.runCommand(
-      'Connect-MgGraph -Scopes "User.ReadWrite.All","Organization.Read.All","Directory.ReadWrite.All","RoleManagement.Read.Directory","Group.ReadWrite.All","GroupMember.ReadWrite.All","AuditLog.Read.All","UserAuthenticationMethod.Read.All" -NoWelcome',
+      'Connect-MgGraph -Scopes "User.ReadWrite.All","Organization.Read.All","Directory.ReadWrite.All","RoleManagement.Read.Directory","Group.ReadWrite.All","GroupMember.ReadWrite.All","AuditLog.Read.All","UserAuthenticationMethod.ReadWrite.All","User-PasswordProfile.ReadWrite.All" -NoWelcome',
     );
     if (error) {
       throw new Error(`Failed to connect to Microsoft Graph: ${error}`);
