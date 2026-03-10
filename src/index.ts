@@ -8,6 +8,7 @@ import { run as deleteUser } from "./commands/delete-user.ts";
 import { run as inactiveUsers } from "./commands/inactive-users.ts";
 import { run as sharedMailboxes } from "./commands/shared-mailboxes.ts";
 import { run as forwardingAudit } from "./commands/forwarding-audit.ts";
+import { run as adminRoles } from "./commands/admin-roles.ts";
 import { run as createGroup } from "./commands/create-group.ts";
 import { run as editGroup } from "./commands/edit-group.ts";
 import { run as deleteGroup } from "./commands/delete-group.ts";
@@ -130,6 +131,7 @@ async function main() {
           { value: "inactive-users", label: "Inactive users" },
           { value: "shared-mailboxes", label: "Shared mailboxes", hint: "will prompt to login" },
           { value: "forwarding-audit", label: "Forwarding audit", hint: "security & compliance" },
+          { value: "admin-roles", label: "Admin role report", hint: "security audit" },
           { value: "back", label: "Back" },
         ],
       });
@@ -145,6 +147,9 @@ async function main() {
           break;
         case "forwarding-audit":
           await forwardingAudit(ps);
+          break;
+        case "admin-roles":
+          await adminRoles(ps);
           break;
       }
     }
