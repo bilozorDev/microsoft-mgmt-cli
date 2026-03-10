@@ -7,6 +7,7 @@ import { run as editUser } from "./commands/edit-user.ts";
 import { run as deleteUser } from "./commands/delete-user.ts";
 import { run as inactiveUsers } from "./commands/inactive-users.ts";
 import { run as sharedMailboxes } from "./commands/shared-mailboxes.ts";
+import { run as forwardingAudit } from "./commands/forwarding-audit.ts";
 import { checkForUpdates } from "./auto-update.ts";
 
 const ps = new PowerShellSession();
@@ -124,6 +125,7 @@ async function main() {
         options: [
           { value: "inactive-users", label: "Inactive users" },
           { value: "shared-mailboxes", label: "Shared mailboxes", hint: "will prompt to login" },
+          { value: "forwarding-audit", label: "Forwarding audit", hint: "security & compliance" },
           { value: "back", label: "Back" },
         ],
       });
@@ -136,6 +138,9 @@ async function main() {
           break;
         case "shared-mailboxes":
           await sharedMailboxes(ps);
+          break;
+        case "forwarding-audit":
+          await forwardingAudit(ps);
           break;
       }
     }
