@@ -285,12 +285,6 @@ export async function run(ps: PowerShellSession): Promise<void> {
   });
   if (p.isCancel(exportXlsx) || !exportXlsx) return;
 
-  const companyName = await p.text({
-    message: "Company name",
-    placeholder: ps.tenantDomain ?? "Acme Corp",
-  });
-  if (p.isCancel(companyName)) return;
-
   const tenantSlug = (ps.tenantDomain ?? "tenant").replace(/\./g, "-");
   const dateSlug = new Date().toISOString().slice(0, 10);
   const outputDir = join(appDir(), "reports output");
@@ -341,7 +335,7 @@ export async function run(ps: PowerShellSession): Promise<void> {
   const buffer = await generateReport({
     sheetName: "Licensed Users",
     title: "Licensed Users Report",
-    tenant: (companyName as string).trim(),
+    tenant: "",
     summary: summaryParts.join(" · "),
     columns,
     rows: excelRows,
