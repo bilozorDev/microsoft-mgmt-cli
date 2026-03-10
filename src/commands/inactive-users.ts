@@ -233,16 +233,7 @@ export async function run(ps: PowerShellSession): Promise<void> {
   const tenantSlug = (ps.tenantDomain ?? "tenant").replace(/\./g, "-");
   const dateSlug = new Date().toISOString().slice(0, 10);
   const outputDir = join(appDir(), "reports output");
-  const defaultName = join(outputDir, `${tenantSlug}-users-report-${dateSlug}.xlsx`);
-
-  const xlsxPath = await p.text({
-    message: "File path",
-    placeholder: defaultName,
-    defaultValue: defaultName,
-  });
-  if (p.isCancel(xlsxPath)) return;
-
-  const fullPath = resolve((xlsxPath as string).trim());
+  const fullPath = resolve(join(outputDir, `${tenantSlug}-users-report-${dateSlug}.xlsx`));
   mkdirSync(dirname(fullPath), { recursive: true });
 
   spin.start("Generating Excel report…");

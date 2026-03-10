@@ -9,8 +9,6 @@ import { appDir } from "../utils.ts";
 interface SharedMailbox {
   DisplayName: string;
   PrimarySmtpAddress: string;
-  Alias: string;
-  WhenCreated: string;
 }
 
 interface SubscribedSku {
@@ -41,7 +39,7 @@ export async function run(ps: PowerShellSession): Promise<void> {
   spin.start("Fetching shared mailboxes…");
 
   const raw = await ps.runCommandJson<SharedMailbox | SharedMailbox[]>(
-    `Get-Mailbox -RecipientTypeDetails SharedMailbox | Select-Object DisplayName,PrimarySmtpAddress,Alias,WhenCreated`,
+    `Get-Mailbox -RecipientTypeDetails SharedMailbox | Select-Object DisplayName,PrimarySmtpAddress`,
   );
 
   const mailboxes = raw ? (Array.isArray(raw) ? raw : [raw]) : [];
@@ -114,18 +112,15 @@ export async function run(ps: PowerShellSession): Promise<void> {
   }
 
   // Display table
-  const header = `${"Name".padEnd(30)} ${"Email".padEnd(40)} ${"Created".padEnd(12)} Licenses`;
+  const header = `${"Name".padEnd(30)} ${"Email".padEnd(40)} Licenses`;
   const separator = "─".repeat(header.length + 20);
   const displayRows = mailboxes.slice(0, 50);
   const rows = displayRows.map((m) => {
     const name = truncate(m.DisplayName ?? "", 29).padEnd(30);
     const email = truncate(m.PrimarySmtpAddress ?? "", 39).padEnd(40);
-    const created = m.WhenCreated
-      ? new Date(m.WhenCreated).toISOString().slice(0, 10)
-      : "";
     const licenses = licenseMap.get(m.PrimarySmtpAddress.toLowerCase());
     const licStr = licenses ? `⚠ ${licenses.join(", ")}` : "—";
-    return `${name} ${email} ${created.padEnd(12)} ${licStr}`;
+    return `${name} ${email} ${licStr}`;
   });
 
   const lines = [header, separator, ...rows];
@@ -145,17 +140,47 @@ export async function run(ps: PowerShellSession): Promise<void> {
     const tenantSlug = (ps.tenantDomain ?? "tenant").replace(/\./g, "-");
     const dateSlug = new Date().toISOString().slice(0, 10);
     const outputDir = join(appDir(), "reports output");
-    const defaultName = join(outputDir, `${tenantSlug}-shared-mailboxes-${dateSlug}.xlsx`);
-
-    const xlsxPath = await p.text({
-      message: "File path",
-      placeholder: defaultName,
-      defaultValue: defaultName,
-    });
-    if (p.isCancel(xlsxPath)) return;
-
-    const fullPath = resolve((xlsxPath as string).trim());
+    const fullPath = resolve(join(outputDir, `${tenantSlug}-shared-mailboxes-${dateSlug}.xlsx`));
     mkdirSync(dirname(fullPath), { recursive: true });
+
+    // Fetch members (Full Access + Send As) for each mailbox
+    const membersMap = new Map<string, string[]>();
+    spin.start(`Fetching members (1/${mailboxes.length})…`);
+    for (let i = 0; i < mailboxes.length; i++) {
+      spin.message(`Fetching members (${i + 1}/${mailboxes.length})…`);
+      const m = mailboxes[i]!;
+      const escaped = m.PrimarySmtpAddress.replace(/'/g, "''");
+      const members = new Set<string>();
+
+      const fullAccessRaw = await ps.runCommandJson<
+        MailboxPermission | MailboxPermission[]
+      >(
+        `Get-MailboxPermission -Identity '${escaped}' | Where-Object { $_.User -ne 'NT AUTHORITY\\SELF' -and $_.IsInherited -eq $false } | Select-Object User,AccessRights`,
+      );
+      const fullAccess = fullAccessRaw
+        ? Array.isArray(fullAccessRaw) ? fullAccessRaw : [fullAccessRaw]
+        : [];
+      for (const perm of fullAccess) {
+        if (!perm.User.startsWith("S-1-5-") && !perm.User.match(/^[0-9a-f-]{36}$/)) members.add(perm.User);
+      }
+
+      const sendAsRaw = await ps.runCommandJson<
+        RecipientPermission | RecipientPermission[]
+      >(
+        `Get-RecipientPermission -Identity '${escaped}' | Where-Object { $_.Trustee -ne 'NT AUTHORITY\\SELF' } | Select-Object Trustee`,
+      );
+      const sendAs = sendAsRaw
+        ? Array.isArray(sendAsRaw) ? sendAsRaw : [sendAsRaw]
+        : [];
+      for (const perm of sendAs) {
+        if (!perm.Trustee.startsWith("S-1-5-") && !perm.Trustee.match(/^[0-9a-f-]{36}$/)) members.add(perm.Trustee);
+      }
+
+      if (members.size > 0) {
+        membersMap.set(m.PrimarySmtpAddress.toLowerCase(), [...members]);
+      }
+    }
+    spin.stop(`Fetched members for ${mailboxes.length} mailbox(es).`);
 
     spin.start("Generating Excel report…");
 
@@ -163,22 +188,20 @@ export async function run(ps: PowerShellSession): Promise<void> {
       sheetName: "Shared Mailboxes",
       title: "Shared Mailboxes Report",
       tenant: ps.tenantDomain ?? "Unknown",
-      summary: `${mailboxes.length} shared mailbox(es) · ${licenseMap.size} with licenses`,
+      summary: `${mailboxes.length} shared mailbox(es)`,
       columns: [
         { header: "Display Name", width: 30 },
         { header: "Email", width: 38 },
-        { header: "Alias", width: 20 },
-        { header: "Created", width: 16 },
-        { header: "Licenses", width: 40 },
+        { header: "Members", width: 40, wrapText: true },
+        { header: "Notes", width: 40 },
       ],
       rows: mailboxes.map((m) => {
-        const licenses = licenseMap.get(m.PrimarySmtpAddress.toLowerCase());
+        const members = membersMap.get(m.PrimarySmtpAddress.toLowerCase()) ?? [];
         return [
           m.DisplayName ?? "",
           m.PrimarySmtpAddress,
-          m.Alias,
-          m.WhenCreated ? new Date(m.WhenCreated).toISOString().slice(0, 10) : "",
-          licenses ? licenses.join("; ") : "",
+          members.join("\n"),
+          "",
         ];
       }),
     });
@@ -190,79 +213,4 @@ export async function run(ps: PowerShellSession): Promise<void> {
     try { Bun.spawn(process.platform === "win32" ? ["explorer", folder] : ["open", folder]); } catch {}
   }
 
-  // Permission drill-down
-  const viewPerms = await p.confirm({
-    message: "View permissions for a mailbox?",
-    initialValue: false,
-  });
-  if (p.isCancel(viewPerms) || !viewPerms) return;
-
-  while (true) {
-    const options = mailboxes.map((m) => ({
-      value: m.PrimarySmtpAddress,
-      label: m.DisplayName,
-      hint: m.PrimarySmtpAddress,
-    }));
-    options.push({ value: "back", label: "Back", hint: "" });
-
-    const selected = await p.select({
-      message: "Select a mailbox",
-      options,
-    });
-    if (p.isCancel(selected) || selected === "back") break;
-
-    const email = selected as string;
-    const escaped = email.replace(/'/g, "''");
-
-    spin.start(`Fetching permissions for ${email}…`);
-
-    // FullAccess permissions
-    const fullAccessRaw = await ps.runCommandJson<
-      MailboxPermission | MailboxPermission[]
-    >(
-      `Get-MailboxPermission -Identity '${escaped}' | Where-Object { $_.User -ne 'NT AUTHORITY\\SELF' -and $_.IsInherited -eq $false } | Select-Object User,AccessRights`,
-    );
-    const fullAccess = fullAccessRaw
-      ? Array.isArray(fullAccessRaw) ? fullAccessRaw : [fullAccessRaw]
-      : [];
-
-    // SendAs permissions
-    const sendAsRaw = await ps.runCommandJson<
-      RecipientPermission | RecipientPermission[]
-    >(
-      `Get-RecipientPermission -Identity '${escaped}' | Where-Object { $_.Trustee -ne 'NT AUTHORITY\\SELF' } | Select-Object Trustee`,
-    );
-    const sendAs = sendAsRaw
-      ? Array.isArray(sendAsRaw) ? sendAsRaw : [sendAsRaw]
-      : [];
-
-    spin.stop(`Permissions for ${email}`);
-
-    const permLines: string[] = [];
-
-    if (fullAccess.length > 0) {
-      permLines.push("Full Access:");
-      for (const perm of fullAccess) {
-        const rights = Array.isArray(perm.AccessRights)
-          ? perm.AccessRights.join(", ")
-          : perm.AccessRights;
-        permLines.push(`  ${perm.User} (${rights})`);
-      }
-    } else {
-      permLines.push("Full Access: none");
-    }
-
-    permLines.push("");
-
-    if (sendAs.length > 0) {
-      permLines.push("Send As:");
-      for (const perm of sendAs) {
-        permLines.push(`  ${perm.Trustee}`);
-      }
-    } else {
-      permLines.push("Send As: none");
-    }
-
-    p.note(permLines.join("\n"), email);
-  }
 }

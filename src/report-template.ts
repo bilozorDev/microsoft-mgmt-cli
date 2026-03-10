@@ -9,7 +9,7 @@ export interface ReportOptions {
   title: string;
   tenant: string;
   summary: string;
-  columns: { header: string; width: number }[];
+  columns: { header: string; width: number; wrapText?: boolean }[];
   rows: string[][];
 }
 
@@ -112,6 +112,7 @@ export async function generateReport(opts: ReportOptions): Promise<Buffer> {
       cell.value = v;
       cell.font = dataFont;
       cell.border = thinBorder;
+      cell.alignment = { vertical: "top", wrapText: !!columns[ci]?.wrapText };
       if (idx % 2 === 0) {
         cell.fill = altFill;
       }
