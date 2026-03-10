@@ -68,14 +68,30 @@ export async function checkForUpdates(): Promise<void> {
   try {
     mkdirSync(tempDir, { recursive: true });
 
-    // Download zip
+    // Download zip with progress
     const dlRes = await fetch(zipAsset.browser_download_url);
-    if (!dlRes.ok) {
+    if (!dlRes.ok || !dlRes.body) {
       spin.stop("Download failed.");
       p.log.warn("Could not download the update. Continuing with current version.");
       return;
     }
-    const buffer = await dlRes.arrayBuffer();
+    const totalBytes = Number(dlRes.headers.get("content-length") || 0);
+    let downloaded = 0;
+    const chunks: Uint8Array[] = [];
+    for await (const chunk of dlRes.body) {
+      chunks.push(chunk);
+      downloaded += chunk.length;
+      if (totalBytes > 0) {
+        const pct = Math.round((downloaded / totalBytes) * 100);
+        const mb = (downloaded / 1024 / 1024).toFixed(1);
+        const totalMb = (totalBytes / 1024 / 1024).toFixed(1);
+        spin.message(`Downloading update… ${mb} / ${totalMb} MB (${pct}%)`);
+      } else {
+        const mb = (downloaded / 1024 / 1024).toFixed(1);
+        spin.message(`Downloading update… ${mb} MB`);
+      }
+    }
+    const buffer = Buffer.concat(chunks);
     await Bun.write(tempZip, buffer);
 
     // Extract using PowerShell
