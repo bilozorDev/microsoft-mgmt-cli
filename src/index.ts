@@ -3,6 +3,7 @@ import { PowerShellSession } from "./powershell.ts";
 import { checkRequirements } from "./requirements.ts";
 import { run as whitelistDomain } from "./commands/whitelist-domain.ts";
 import { run as createUser } from "./commands/create-user.ts";
+import { run as editUser } from "./commands/edit-user.ts";
 import { run as deleteUser } from "./commands/delete-user.ts";
 import { run as inactiveUsers } from "./commands/inactive-users.ts";
 import { run as sharedMailboxes } from "./commands/shared-mailboxes.ts";
@@ -94,6 +95,7 @@ async function main() {
         message: "User Management",
         options: [
           { value: "create-user", label: "Create user", hint: "will prompt to login" },
+          { value: "edit-user", label: "Edit user", hint: "will prompt to login" },
           { value: "delete-user", label: "Delete user", hint: "will prompt to login" },
           { value: "back", label: "Back" },
         ],
@@ -104,6 +106,9 @@ async function main() {
       switch (action) {
         case "create-user":
           await createUser(ps);
+          break;
+        case "edit-user":
+          await editUser(ps);
           break;
         case "delete-user":
           await deleteUser(ps);

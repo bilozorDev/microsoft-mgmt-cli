@@ -2,7 +2,7 @@ import * as p from "@clack/prompts";
 import type { PowerShellSession } from "../powershell.ts";
 import { generatePassword, validatePassword } from "../password.ts";
 import { friendlySkuName } from "../sku-names.ts";
-import { escapePS } from "../utils.ts";
+import { escapePS, createSecretLink } from "../utils.ts";
 import { run as addToDistributionGroup } from "./add-to-distribution-group.ts";
 import { run as addToSecurityGroup } from "./add-to-security-group.ts";
 import { run as addToSharedMailbox } from "./add-to-shared-mailbox.ts";
@@ -291,11 +291,33 @@ export async function run(ps: PowerShellSession): Promise<void> {
     }
   }
 
-  // 11. Show credentials
+  // 11. Show credentials & create one-time secret link
   p.note(
     [`UPN:      ${upn}`, `Password: ${password}`].join("\n"),
     "Credentials (user must change password at first sign-in)",
   );
+
+  const otsSpin = p.spinner();
+  otsSpin.start("Creating one-time secret link...");
+  const secretLink = await createSecretLink(
+    `Username: ${upn}\nPassword: ${password}`,
+  );
+  if (secretLink) {
+    otsSpin.stop("One-time secret link created.");
+    try {
+      if (process.platform === "win32") {
+        await ps.runCommand(`Set-Clipboard -Value '${escapePS(secretLink)}'`);
+      } else {
+        const proc = Bun.spawn(["pbcopy"], { stdin: new Blob([secretLink]) });
+        await proc.exited;
+      }
+      p.log.success(`Copied to clipboard: ${secretLink}`);
+    } catch {
+      p.log.info(`Secret link: ${secretLink}`);
+    }
+  } else {
+    otsSpin.stop("Failed to create one-time secret link.");
+  }
 
   p.log.success("User created successfully.");
 

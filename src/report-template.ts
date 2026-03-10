@@ -1,8 +1,29 @@
-import { join } from "path";
+import { dirname, join } from "path";
 import ExcelJS from "exceljs";
 
-function getLogoPath(): string {
-  return join(import.meta.dir, "assets", "logo.png");
+// Load logo lazily — cached after first call, skipped if unavailable
+let logoCache: ArrayBuffer | null | undefined;
+async function loadLogo(): Promise<ArrayBuffer | null> {
+  if (logoCache !== undefined) return logoCache;
+  try {
+    // In compiled binary: look next to the exe. In dev: use source assets.
+    const exeDir = dirname(process.execPath);
+    const candidates = [
+      join(exeDir, "logo.png"),
+      new URL("assets/logo.png", import.meta.url),
+    ];
+    for (const path of candidates) {
+      const file = Bun.file(path);
+      if (await file.exists()) {
+        logoCache = await file.arrayBuffer();
+        return logoCache;
+      }
+    }
+    logoCache = null;
+  } catch {
+    logoCache = null;
+  }
+  return logoCache;
 }
 
 function colLetter(n: number): string {
@@ -38,14 +59,17 @@ export async function generateReport(opts: ReportOptions): Promise<Buffer> {
   ws.columns = columns.map((c) => ({ width: c.width }));
 
   // --- Logo (cols A-B, rows 1-4) ---
-  const logoId = wb.addImage({
-    filename: getLogoPath(),
-    extension: "png",
-  });
-  ws.addImage(logoId, {
-    tl: { col: 0, row: 0 } as any,
-    br: { col: 2, row: 4 } as any,
-  });
+  const logo = await loadLogo();
+  if (logo) {
+    const logoId = wb.addImage({
+      buffer: logo,
+      extension: "png",
+    });
+    ws.addImage(logoId, {
+      tl: { col: 0, row: 0 } as any,
+      br: { col: 2, row: 4 } as any,
+    });
+  }
 
   // --- Title (row 1) ---
   ws.mergeCells(`C1:${lastCol}1`);

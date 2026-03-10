@@ -4,6 +4,7 @@ import * as p from "@clack/prompts";
 import type { PowerShellSession } from "../powershell.ts";
 import { friendlySkuName } from "../sku-names.ts";
 import { generateReport } from "../report-template.ts";
+import { appDir } from "../utils.ts";
 
 interface SubscribedSku {
   SkuId: string;
@@ -231,7 +232,7 @@ export async function run(ps: PowerShellSession): Promise<void> {
 
   const tenantSlug = (ps.tenantDomain ?? "tenant").replace(/\./g, "-");
   const dateSlug = new Date().toISOString().slice(0, 10);
-  const outputDir = join(process.cwd(), "reports output");
+  const outputDir = join(appDir(), "reports output");
   const defaultName = join(outputDir, `${tenantSlug}-users-report-${dateSlug}.xlsx`);
 
   const xlsxPath = await p.text({
@@ -278,5 +279,5 @@ export async function run(ps: PowerShellSession): Promise<void> {
   spin.stop(`Exported ${inactive.length} rows to ${fullPath}`);
 
   const folder = dirname(fullPath);
-  Bun.spawn(["open", folder]);
+  try { Bun.spawn(process.platform === "win32" ? ["explorer", folder] : ["open", folder]); } catch {}
 }

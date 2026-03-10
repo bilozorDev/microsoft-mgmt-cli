@@ -86,6 +86,26 @@ The template handles: logo (`src/assets/logo.png`), title/tenant/date/summary he
 
 `Connect-ExchangeOnline` uses interactive browser login. Do NOT use `-UseDeviceAuthentication`. Graph connects lazily via `Connect-MgGraph` with specific scopes when first needed.
 
+### One-time secret links (`src/utils.ts`)
+
+`createSecretLink(secret, ttl)` calls the onetimesecret.com API (anonymous, no auth) to create a self-destructing link. Used after user creation to share credentials securely. Default TTL is 7 days.
+
+### Helper commands (`src/commands/add-to-*.ts`)
+
+Reusable membership helpers called from create-user, edit-user, and delete-user. They accept an optional `upn` parameter — when provided, they skip the user-selection prompt and operate on that UPN directly.
+
+## Cross-Platform (Windows / macOS)
+
+The app runs on macOS via `bun run start` and ships as a Windows exe via `bun run build:windows`. Key platform differences to handle:
+
+- **Clipboard:** use `Set-Clipboard` via the PowerShell session on Windows, `pbcopy` via `Bun.spawn` on macOS
+- **Open folder:** `explorer` on Windows, `open` on macOS — always wrap in `try/catch`
+- **File paths:** use Node's `path.join()`/`path.resolve()` (platform-aware); never hardcode `/` or `\`
+- **Asset embedding:** `import.meta.dir` and `import.meta.url` don't resolve to filesystem paths in compiled Bun binaries. Use `fileURLToPath(new URL("...", import.meta.url))` and read assets into buffers at module load time.
+- **Report saving:** always call `mkdirSync(dirname(fullPath), { recursive: true })` before `Bun.write()` to ensure parent directories exist
+- **Signals:** `SIGTERM` is not supported on Windows; `SIGINT` (Ctrl+C) works on both
+- **PowerShell:** requires `pwsh` (PowerShell Core 7+), not the built-in Windows PowerShell 5.1 (`powershell.exe`)
+
 ## Patterns
 
 - **Single quotes in PowerShell:** escape with `value.replace(/'/g, "''")`

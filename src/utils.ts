@@ -1,8 +1,37 @@
+import { dirname, join } from "path";
 import * as p from "@clack/prompts";
 import type { PowerShellSession } from "./powershell.ts";
 
+/** Directory where the executable (or script) lives — reports save relative to this. */
+export function appDir(): string {
+  return dirname(process.execPath);
+}
+
 export function escapePS(value: string): string {
   return value.replace(/'/g, "''");
+}
+
+/**
+ * Creates a one-time secret link via onetimesecret.com (anonymous, no auth needed).
+ * Returns the shareable URL or null on failure.
+ */
+export async function createSecretLink(
+  secret: string,
+  ttl: number = 604800,
+): Promise<string | null> {
+  try {
+    const res = await fetch("https://us.onetimesecret.com/api/v1/share", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ secret, ttl: String(ttl) }),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { secret_key?: string };
+    if (!data.secret_key) return null;
+    return `https://us.onetimesecret.com/secret/${data.secret_key}`;
+  } catch {
+    return null;
+  }
 }
 
 /**

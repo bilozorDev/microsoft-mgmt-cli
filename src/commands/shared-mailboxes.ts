@@ -1,8 +1,10 @@
-import { resolve, dirname } from "path";
+import { resolve, dirname, join } from "path";
+import { mkdirSync } from "fs";
 import * as p from "@clack/prompts";
 import type { PowerShellSession } from "../powershell.ts";
 import { friendlySkuName } from "../sku-names.ts";
 import { generateReport } from "../report-template.ts";
+import { appDir } from "../utils.ts";
 
 interface SharedMailbox {
   DisplayName: string;
@@ -142,7 +144,8 @@ export async function run(ps: PowerShellSession): Promise<void> {
   if (exportXlsx) {
     const tenantSlug = (ps.tenantDomain ?? "tenant").replace(/\./g, "-");
     const dateSlug = new Date().toISOString().slice(0, 10);
-    const defaultName = `${tenantSlug}-shared-mailboxes-${dateSlug}.xlsx`;
+    const outputDir = join(appDir(), "reports output");
+    const defaultName = join(outputDir, `${tenantSlug}-shared-mailboxes-${dateSlug}.xlsx`);
 
     const xlsxPath = await p.text({
       message: "File path",
@@ -152,6 +155,7 @@ export async function run(ps: PowerShellSession): Promise<void> {
     if (p.isCancel(xlsxPath)) return;
 
     const fullPath = resolve((xlsxPath as string).trim());
+    mkdirSync(dirname(fullPath), { recursive: true });
 
     spin.start("Generating Excel report…");
 
@@ -183,7 +187,7 @@ export async function run(ps: PowerShellSession): Promise<void> {
     spin.stop(`Exported ${mailboxes.length} rows to ${fullPath}`);
 
     const folder = dirname(fullPath);
-    Bun.spawn(["open", folder]);
+    try { Bun.spawn(process.platform === "win32" ? ["explorer", folder] : ["open", folder]); } catch {}
   }
 
   // Permission drill-down

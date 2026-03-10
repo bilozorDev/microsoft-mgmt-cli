@@ -5,7 +5,7 @@
   "private": true,
   "scripts": {
     "start": "bun run src/index.ts",
-    "build:windows": "bun build --compile --target=bun-windows-x64 src/index.ts --outfile dist/profulgent.exe"
+    "build:windows": "bun build --compile --target=bun-windows-x64 src/index.ts --outfile \"dist/Profulgent Microsoft Script/profulgent.exe\" && cp src/assets/logo.png \"dist/Profulgent Microsoft Script/logo.png\" && cd dist && zip -r -9 \"Profulgent Microsoft Script.zip\" \"Profulgent Microsoft Script\""
   },
   "devDependencies": {
     "@types/bun": "latest"
