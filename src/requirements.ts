@@ -75,23 +75,23 @@ export async function checkRequirements(): Promise<void> {
         process.exit(1);
       }
 
-      const spin = p.spinner();
-      spin.start("Installing PowerShell Core...");
+      p.log.info("Installing PowerShell Core (this may take a minute)...");
       const cmd =
         process.platform === "darwin"
           ? ["brew", "install", "powershell"]
-          : ["winget", "install", "Microsoft.PowerShell"];
+          : ["winget", "install", "Microsoft.PowerShell", "--accept-source-agreements", "--accept-package-agreements"];
       const installProc = Bun.spawn(cmd, {
+        stdin: "inherit",
         stdout: "inherit",
         stderr: "inherit",
       });
       const code = await installProc.exited;
       if (code !== 0) {
-        spin.stop("Installation failed.");
-        p.log.error(`Install manually: ${hint}`);
+        p.log.error(`Installation failed. Install manually: ${hint}`);
         process.exit(1);
       }
-      spin.stop("PowerShell Core installed.");
+      p.log.success("PowerShell Core installed. Please close and reopen this app.");
+      process.exit(0);
     } else {
       p.log.info(`Install manually:\n  ${hint}`);
       process.exit(1);
@@ -102,47 +102,34 @@ export async function checkRequirements(): Promise<void> {
   const missing = await checkModules();
   if (missing.length === 0) return;
 
-  // 3. Show what's missing and offer to install
-  p.note(
-    missing.map((m) => `- ${m}`).join("\n"),
-    "Missing PowerShell modules",
-  );
+  // 3. Show what's missing and auto-install
+  p.log.warn(`Missing module${missing.length > 1 ? "s" : ""}: ${missing.join(", ")}`);
 
   const install = await p.confirm({
     message: "Install missing modules now?",
   });
 
   if (p.isCancel(install) || !install) {
-    p.log.info("Install manually:");
-    for (const m of missing) {
-      p.log.info(
-        `  Install-Module -Name ${m} -Scope CurrentUser -Force`,
-      );
-    }
     process.exit(1);
   }
 
   for (const m of missing) {
-    const spin = p.spinner();
-    spin.start(`Installing ${m}...`);
+    p.log.info(`Installing ${m} (this may take a minute)...`);
     const proc = Bun.spawn(
       [
         "pwsh",
         "-NoLogo",
         "-NoProfile",
         "-Command",
-        `Install-Module -Name ${m} -Scope CurrentUser -Force`,
+        `Install-Module -Name ${m} -Scope CurrentUser -Force -AllowClobber`,
       ],
-      { stdout: "inherit", stderr: "inherit" },
+      { stdin: "inherit", stdout: "inherit", stderr: "inherit" },
     );
     const code = await proc.exited;
     if (code !== 0) {
-      spin.stop(`Failed to install ${m}.`);
-      p.log.error(
-        `Install manually: Install-Module -Name ${m} -Scope CurrentUser -Force`,
-      );
+      p.log.error(`Failed to install ${m}.`);
       process.exit(1);
     }
-    spin.stop(`${m} installed.`);
+    p.log.success(`${m} installed.`);
   }
 }
