@@ -15,6 +15,7 @@ import { run as createGroup } from "./commands/create-group.ts";
 import { run as editGroup } from "./commands/edit-group.ts";
 import { run as deleteGroup } from "./commands/delete-group.ts";
 import { checkForUpdates } from "./auto-update.ts";
+import pkg from "../package.json";
 
 const ps = new PowerShellSession();
 
@@ -29,7 +30,7 @@ process.on("SIGINT", () => void cleanup());
 process.on("SIGTERM", () => void cleanup());
 
 async function main() {
-  p.intro("Microsoft 365 Admin CLI");
+  p.intro(`Microsoft 365 Admin CLI v${pkg.version}`);
 
   await checkRequirements();
   await checkForUpdates();
