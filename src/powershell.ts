@@ -9,7 +9,10 @@ const ERROR_MARKER = "---PROFULGENT-ERROR---";
 // at a time even with piped stdin, unlike PowerShell's -Command - mode which
 // buffers ALL stdin before executing).
 // Commands are accumulated until the EXEC marker, then executed.
-// Markers are written directly via [Console]::Out to bypass pipeline buffering.
+// Output is captured via Out-String and written through [Console]::Out so it
+// stays ordered relative to the end/error markers (Invoke-Expression output
+// goes through PowerShell's async formatting pipeline, which can race with
+// direct [Console]::Out writes and leak into subsequent commands).
 const LOOP_SCRIPT = `
 $sb = [System.Text.StringBuilder]::new()
 while ($true) {
@@ -20,7 +23,8 @@ while ($true) {
         [void]$sb.Clear()
         try {
             $ErrorActionPreference = 'Stop'
-            Invoke-Expression $cmd
+            $__out = @(Invoke-Expression $cmd) | Out-String
+            if ($__out.Length -gt 0) { [Console]::Out.Write($__out) }
         } catch {
             [Console]::Out.WriteLine($_.Exception.Message)
             [Console]::Out.WriteLine('${ERROR_MARKER}')
@@ -187,11 +191,7 @@ export class PowerShellSession {
     if (error) {
       throw new Error(`Failed to get tenant domain: ${error}`);
     }
-    // Extract just the domain — residual async output from prior commands may be in the stream
-    const domain = output.trim().split("\n").map((l) => l.trim()).find(
-      (l) => /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(l)
-    );
-    this.tenantDomain = domain || output.trim();
+    this.tenantDomain = output.trim();
     return this.tenantDomain;
   }
 
@@ -210,9 +210,6 @@ export class PowerShellSession {
     } catch {
       // Best-effort disconnect
     }
-
-    // Drain any residual async output from Exchange disconnect
-    await this.runCommand("Start-Sleep -Milliseconds 500");
 
     await this.connectExchangeOnline();
     await this.getTenantDomain();
