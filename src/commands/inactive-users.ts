@@ -1,5 +1,5 @@
 import { resolve, dirname, join } from "path";
-import { mkdirSync } from "fs";
+import { mkdirSync, chmodSync } from "fs";
 import * as p from "@clack/prompts";
 import type { PowerShellSession } from "../powershell.ts";
 import { friendlySkuName } from "../sku-names.ts";
@@ -229,6 +229,7 @@ export async function run(ps: PowerShellSession): Promise<void> {
   const outputDir = join(appDir(), "reports output");
   const fullPath = resolve(join(outputDir, `${tenantSlug}-users-report-${dateSlug}.xlsx`));
   mkdirSync(dirname(fullPath), { recursive: true });
+  try { chmodSync(dirname(fullPath), 0o700); } catch {}
 
   spin.start("Generating Excel report…");
 
@@ -261,6 +262,7 @@ export async function run(ps: PowerShellSession): Promise<void> {
   });
 
   await Bun.write(fullPath, buffer);
+  try { chmodSync(fullPath, 0o600); } catch {}
   spin.stop(`Exported ${inactive.length} rows to ${fullPath}`);
 
   const folder = dirname(fullPath);

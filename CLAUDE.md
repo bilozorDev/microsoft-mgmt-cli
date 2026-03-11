@@ -101,11 +101,11 @@ The `version` field in `package.json` is the source of truth — Bun inlines it 
 
 1. Bump `version` in `package.json`
 2. Commit and push the version bump
-3. `bun run build:windows` — produces `dist/Microsoft 365 Admin CLI.zip`
+3. `bun run build:windows` — produces `dist/Microsoft 365 Admin CLI.zip` and `dist/Microsoft 365 Admin CLI.zip.sha256`
 4. `gh release create v<version> --title "v<version>" --notes "..."` — create the GitHub release
-5. `gh release upload v<version> "dist/Microsoft 365 Admin CLI.zip"` — attach the binary
+5. `gh release upload v<version> "dist/Microsoft 365 Admin CLI.zip" "dist/Microsoft 365 Admin CLI.zip.sha256"` — attach the binary and checksum
 
-All five steps are required — the auto-updater downloads the zip asset from the GitHub release, so a release without the binary is not usable. The auto-updater compares `tag_name` (stripped of leading `v`) against the compiled-in version.
+All five steps are required — the auto-updater downloads the zip asset from the GitHub release, so a release without the binary is not usable. The `.sha256` file is used for integrity verification during auto-update; if missing, the user is prompted to confirm. The auto-updater compares `tag_name` (stripped of leading `v`) against the compiled-in version using proper semver comparison.
 
 ### Helper commands (`src/commands/add-to-*.ts`)
 

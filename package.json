@@ -1,12 +1,12 @@
 {
   "name": "m365-admin-cli",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "module": "src/index.ts",
   "type": "module",
   "private": true,
   "scripts": {
     "start": "bun run src/index.ts",
-    "build:windows": "bun build --compile --target=bun-windows-x64 src/index.ts --outfile \"dist/Microsoft 365 Admin CLI/m365-admin.exe\" && cd dist && zip -r -9 \"Microsoft 365 Admin CLI.zip\" \"Microsoft 365 Admin CLI\""
+    "build:windows": "bun build --compile --target=bun-windows-x64 src/index.ts --outfile \"dist/Microsoft 365 Admin CLI/m365-admin.exe\" && cd dist && zip -r -9 \"Microsoft 365 Admin CLI.zip\" \"Microsoft 365 Admin CLI\" && shasum -a 256 \"Microsoft 365 Admin CLI.zip\" | cut -d ' ' -f 1 > \"Microsoft 365 Admin CLI.zip.sha256\""
   },
   "devDependencies": {
     "@types/bun": "latest"

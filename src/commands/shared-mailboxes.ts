@@ -1,10 +1,10 @@
 import { resolve, dirname, join } from "path";
-import { mkdirSync } from "fs";
+import { mkdirSync, chmodSync } from "fs";
 import * as p from "@clack/prompts";
 import type { PowerShellSession } from "../powershell.ts";
 import { friendlySkuName } from "../sku-names.ts";
 import { generateReport } from "../report-template.ts";
-import { appDir } from "../utils.ts";
+import { appDir, escapePS } from "../utils.ts";
 
 interface SharedMailbox {
   DisplayName: string;
@@ -58,7 +58,7 @@ export async function run(ps: PowerShellSession): Promise<void> {
 
     // Build filter for shared mailbox UPNs
     const upns = mailboxes.map((m) => m.PrimarySmtpAddress);
-    const filterParts = upns.map((u) => `UserPrincipalName eq '${u.replace(/'/g, "''")}'`);
+    const filterParts = upns.map((u) => `UserPrincipalName eq '${escapePS(u)}'`);
     // Graph $filter has a URL length limit — batch in groups of 15
     const chunks: string[][] = [];
     for (let i = 0; i < filterParts.length; i += 15) {
@@ -142,6 +142,7 @@ export async function run(ps: PowerShellSession): Promise<void> {
     const outputDir = join(appDir(), "reports output");
     const fullPath = resolve(join(outputDir, `${tenantSlug}-shared-mailboxes-${dateSlug}.xlsx`));
     mkdirSync(dirname(fullPath), { recursive: true });
+    try { chmodSync(dirname(fullPath), 0o700); } catch {}
 
     // Fetch members (Full Access + Send As) for each mailbox
     const membersMap = new Map<string, string[]>();
@@ -149,7 +150,7 @@ export async function run(ps: PowerShellSession): Promise<void> {
     for (let i = 0; i < mailboxes.length; i++) {
       spin.message(`Fetching members (${i + 1}/${mailboxes.length})…`);
       const m = mailboxes[i]!;
-      const escaped = m.PrimarySmtpAddress.replace(/'/g, "''");
+      const escaped = escapePS(m.PrimarySmtpAddress);
       const members = new Set<string>();
 
       const fullAccessRaw = await ps.runCommandJson<
@@ -207,6 +208,7 @@ export async function run(ps: PowerShellSession): Promise<void> {
     });
 
     await Bun.write(fullPath, buffer);
+    try { chmodSync(fullPath, 0o600); } catch {}
     spin.stop(`Exported ${mailboxes.length} rows to ${fullPath}`);
 
     const folder = dirname(fullPath);

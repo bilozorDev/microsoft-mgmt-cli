@@ -7,6 +7,20 @@ import pkg from "../package.json";
 
 const REPO = "bilozorDev/microsoft-mgmt-cli";
 
+/** Compare two semver-like version strings (e.g. "1.7.0"). Returns -1, 0, or 1. */
+function compareVersions(a: string, b: string): number {
+  const aParts = a.split(".").map(Number);
+  const bParts = b.split(".").map(Number);
+  const len = Math.max(aParts.length, bParts.length);
+  for (let i = 0; i < len; i++) {
+    const av = aParts[i] ?? 0;
+    const bv = bParts[i] ?? 0;
+    if (av < bv) return -1;
+    if (av > bv) return 1;
+  }
+  return 0;
+}
+
 interface GitHubAsset {
   name: string;
   browser_download_url: string;
@@ -38,7 +52,7 @@ export async function checkForUpdates(): Promise<void> {
   }
 
   const latestVersion = release.tag_name.replace(/^v/, "");
-  if (latestVersion <= currentVersion) return;
+  if (compareVersions(latestVersion, currentVersion) <= 0) return;
 
   // Show update info
   p.log.info(`Update available: v${currentVersion} → v${latestVersion}`);
@@ -92,6 +106,41 @@ export async function checkForUpdates(): Promise<void> {
       }
     }
     const buffer = Buffer.concat(chunks);
+
+    // SHA-256 integrity verification
+    const sha256Asset = release.assets.find((a) => a.name.endsWith(".sha256"));
+    if (sha256Asset) {
+      spin.message("Verifying integrity...");
+      try {
+        const shaRes = await fetch(sha256Asset.browser_download_url);
+        if (shaRes.ok) {
+          const expectedHash = (await shaRes.text()).trim().toLowerCase();
+          const hasher = new Bun.CryptoHasher("sha256");
+          hasher.update(buffer);
+          const actualHash = hasher.digest("hex");
+          if (actualHash !== expectedHash) {
+            spin.stop("Integrity check failed.");
+            p.log.error(`SHA-256 mismatch:\n  Expected: ${expectedHash}\n  Actual:   ${actualHash}`);
+            p.log.warn("The downloaded file may be corrupted or tampered with. Aborting update.");
+            rmSync(tempDir, { recursive: true, force: true });
+            return;
+          }
+        }
+      } catch {
+        // If we can't fetch the hash, treat as missing
+      }
+    } else {
+      spin.stop("No SHA-256 checksum found for this release.");
+      const continueWithout = await p.confirm({
+        message: "Continue without integrity verification?",
+      });
+      if (p.isCancel(continueWithout) || !continueWithout) {
+        rmSync(tempDir, { recursive: true, force: true });
+        return;
+      }
+      spin.start("Installing update...");
+    }
+
     await Bun.write(tempZip, buffer);
 
     // Extract using PowerShell

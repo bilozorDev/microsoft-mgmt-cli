@@ -36,7 +36,30 @@ while ($true) {
 export class PowerShellSession {
   private process: Subprocess<"pipe", "pipe", "inherit"> | null = null;
   private decoder = new TextDecoder();
-  private graphConnected = false;
+  private graphScopeLevel: "none" | "read" | "readwrite" = "none";
+
+  private static readonly READ_SCOPES = [
+    "User.Read.All",
+    "Organization.Read.All",
+    "Directory.Read.All",
+    "RoleManagement.Read.Directory",
+    "Group.Read.All",
+    "GroupMember.Read.All",
+    "AuditLog.Read.All",
+    "UserAuthenticationMethod.Read.All",
+  ];
+
+  private static readonly READWRITE_SCOPES = [
+    "User.ReadWrite.All",
+    "Organization.Read.All",
+    "Directory.ReadWrite.All",
+    "RoleManagement.Read.Directory",
+    "Group.ReadWrite.All",
+    "GroupMember.ReadWrite.All",
+    "AuditLog.Read.All",
+    "UserAuthenticationMethod.ReadWrite.All",
+    "User-PasswordProfile.ReadWrite.All",
+  ];
   tenantDomain: string | null = null;
 
   async start(): Promise<void> {
@@ -121,15 +144,31 @@ export class PowerShellSession {
     return JSON.parse(output) as T;
   }
 
-  async ensureGraphConnected(): Promise<void> {
-    if (this.graphConnected) return;
+  async ensureGraphConnected(needsWrite = false): Promise<void> {
+    if (this.graphScopeLevel === "readwrite") return;
+    if (this.graphScopeLevel === "read" && !needsWrite) return;
+
+    // Disconnect existing session if upgrading from read to readwrite
+    if (this.graphScopeLevel === "read" && needsWrite) {
+      try {
+        await this.runCommand("Disconnect-MgGraph *>$null");
+      } catch {
+        // Best-effort disconnect
+      }
+      this.graphScopeLevel = "none";
+    }
+
+    const scopes = needsWrite
+      ? PowerShellSession.READWRITE_SCOPES
+      : PowerShellSession.READ_SCOPES;
+    const scopeStr = scopes.map((s) => `"${s}"`).join(",");
     const { error } = await this.runCommand(
-      'Connect-MgGraph -Scopes "User.ReadWrite.All","Organization.Read.All","Directory.ReadWrite.All","RoleManagement.Read.Directory","Group.ReadWrite.All","GroupMember.ReadWrite.All","AuditLog.Read.All","UserAuthenticationMethod.ReadWrite.All","User-PasswordProfile.ReadWrite.All" -NoWelcome',
+      `Connect-MgGraph -Scopes ${scopeStr} -NoWelcome`,
     );
     if (error) {
       throw new Error(`Failed to connect to Microsoft Graph: ${error}`);
     }
-    this.graphConnected = true;
+    this.graphScopeLevel = needsWrite ? "readwrite" : "read";
   }
 
   async connectExchangeOnline(): Promise<void> {
@@ -157,13 +196,13 @@ export class PowerShellSession {
   }
 
   async switchTenant(): Promise<void> {
-    if (this.graphConnected) {
+    if (this.graphScopeLevel !== "none") {
       try {
         await this.runCommand("Disconnect-MgGraph *>$null");
       } catch {
         // Best-effort disconnect
       }
-      this.graphConnected = false;
+      this.graphScopeLevel = "none";
     }
 
     try {
@@ -182,13 +221,13 @@ export class PowerShellSession {
   async end(): Promise<void> {
     if (!this.process) return;
 
-    if (this.graphConnected) {
+    if (this.graphScopeLevel !== "none") {
       try {
         await this.runCommand("Disconnect-MgGraph *>$null");
       } catch {
         // Best-effort disconnect
       }
-      this.graphConnected = false;
+      this.graphScopeLevel = "none";
     }
 
     try {
