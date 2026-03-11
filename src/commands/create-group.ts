@@ -18,6 +18,20 @@ interface CreatedGroup {
   DisplayName: string;
 }
 
+async function copyToClipboard(ps: PowerShellSession, text: string): Promise<boolean> {
+  try {
+    if (process.platform === "win32") {
+      await ps.runCommand(`Set-Clipboard -Value '${escapePS(text)}'`);
+    } else {
+      const proc = Bun.spawn(["pbcopy"], { stdin: new Blob([text]) });
+      await proc.exited;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function fetchAcceptedDomains(ps: PowerShellSession): Promise<AcceptedDomain[]> {
   const raw = await ps.runCommandJson<AcceptedDomain | AcceptedDomain[]>(
     "Get-AcceptedDomain | Select-Object DomainName, Default",
@@ -204,6 +218,7 @@ async function createDistributionGroup(ps: PowerShellSession): Promise<void> {
   }
 
   // Add members
+  const addedMembers: { name: string; upn: string }[] = [];
   const addMembers = await p.confirm({ message: "Add members?" });
   if (!p.isCancel(addMembers) && addMembers) {
     const members = await selectMultipleUsers(ps, "Select members");
@@ -218,11 +233,13 @@ async function createDistributionGroup(ps: PowerShellSession): Promise<void> {
         p.log.error(error);
       } else {
         spin.stop(`Added ${member.DisplayName}.`);
+        addedMembers.push({ name: member.DisplayName, upn: member.UserPrincipalName });
       }
     }
   }
 
   // Add owners
+  const addedOwners: { name: string; upn: string }[] = [];
   const addOwners = await p.confirm({ message: "Add owners?" });
   if (!p.isCancel(addOwners) && addOwners) {
     const owners = await selectMultipleUsers(ps, "Select owners");
@@ -237,6 +254,7 @@ async function createDistributionGroup(ps: PowerShellSession): Promise<void> {
         p.log.error(error);
       } else {
         spin.stop(`Added ${owner.DisplayName} as owner.`);
+        addedOwners.push({ name: owner.DisplayName, upn: owner.UserPrincipalName });
       }
     }
   }
@@ -245,6 +263,30 @@ async function createDistributionGroup(ps: PowerShellSession): Promise<void> {
     [`Name:  ${displayName}`, `Email: ${emailResult.email}`].join("\n"),
     "Distribution group created",
   );
+
+  // Ticket note clipboard option
+  let ticketNote = `Created distribution group ${displayName} (${emailResult.email}).`;
+  if (addedMembers.length > 0) {
+    ticketNote += `\nAdded members:\n${addedMembers.map((m) => `  - ${m.name} (${m.upn})`).join("\n")}`;
+  }
+  if (addedOwners.length > 0) {
+    ticketNote += `\nAdded owners:\n${addedOwners.map((o) => `  - ${o.name} (${o.upn})`).join("\n")}`;
+  }
+
+  const distAction = await p.select({
+    message: "Next",
+    options: [
+      { value: "copy-ticket", label: "Copy ticket update note to clipboard" },
+      { value: "done", label: "Done" },
+    ],
+  });
+  if (!p.isCancel(distAction) && distAction === "copy-ticket") {
+    if (await copyToClipboard(ps, ticketNote)) {
+      p.log.success("Ticket update note copied to clipboard.");
+    } else {
+      p.log.info(ticketNote);
+    }
+  }
 }
 
 async function createSecurityGroup(ps: PowerShellSession): Promise<void> {
@@ -297,6 +339,7 @@ async function createSecurityGroup(ps: PowerShellSession): Promise<void> {
   }
 
   // Add members
+  const addedMembers: { name: string; upn: string }[] = [];
   const addMembers = await p.confirm({ message: "Add members?" });
   if (!p.isCancel(addMembers) && addMembers) {
     const members = await selectMultipleUsers(ps, "Select members");
@@ -311,11 +354,13 @@ async function createSecurityGroup(ps: PowerShellSession): Promise<void> {
         p.log.error(error);
       } else {
         spin.stop(`Added ${member.DisplayName}.`);
+        addedMembers.push({ name: member.DisplayName, upn: member.UserPrincipalName });
       }
     }
   }
 
   // Add owners
+  const addedOwners: { name: string; upn: string }[] = [];
   const addOwners = await p.confirm({ message: "Add owners?" });
   if (!p.isCancel(addOwners) && addOwners) {
     const owners = await selectMultipleUsers(ps, "Select owners");
@@ -330,6 +375,7 @@ async function createSecurityGroup(ps: PowerShellSession): Promise<void> {
         p.log.error(error);
       } else {
         spin.stop(`Added ${owner.DisplayName} as owner.`);
+        addedOwners.push({ name: owner.DisplayName, upn: owner.UserPrincipalName });
       }
     }
   }
@@ -338,6 +384,30 @@ async function createSecurityGroup(ps: PowerShellSession): Promise<void> {
     [`Name:     ${displayName}`, `Nickname: ${mailNickname}`].join("\n"),
     "Security group created",
   );
+
+  // Ticket note clipboard option
+  let ticketNote = `Created security group ${displayName} (${mailNickname}).`;
+  if (addedMembers.length > 0) {
+    ticketNote += `\nAdded members:\n${addedMembers.map((m) => `  - ${m.name} (${m.upn})`).join("\n")}`;
+  }
+  if (addedOwners.length > 0) {
+    ticketNote += `\nAdded owners:\n${addedOwners.map((o) => `  - ${o.name} (${o.upn})`).join("\n")}`;
+  }
+
+  const secAction = await p.select({
+    message: "Next",
+    options: [
+      { value: "copy-ticket", label: "Copy ticket update note to clipboard" },
+      { value: "done", label: "Done" },
+    ],
+  });
+  if (!p.isCancel(secAction) && secAction === "copy-ticket") {
+    if (await copyToClipboard(ps, ticketNote)) {
+      p.log.success("Ticket update note copied to clipboard.");
+    } else {
+      p.log.info(ticketNote);
+    }
+  }
 }
 
 async function createSharedMailbox(ps: PowerShellSession): Promise<void> {
@@ -368,6 +438,7 @@ async function createSharedMailbox(ps: PowerShellSession): Promise<void> {
   createSpin.stop("Shared mailbox created.");
 
   // Add user permissions
+  const addedUsers: { name: string; upn: string; perms: string[] }[] = [];
   const addPerms = await p.confirm({ message: "Add user permissions?" });
   if (!p.isCancel(addPerms) && addPerms) {
     const graphSpin = p.spinner();
@@ -407,6 +478,7 @@ async function createSharedMailbox(ps: PowerShellSession): Promise<void> {
           const spin = p.spinner();
           spin.start(`Granting permissions to ${user.DisplayName}...`);
           const errors: string[] = [];
+          const grantedPerms: string[] = [];
 
           for (const perm of permissions) {
             let result: { error: string };
@@ -427,6 +499,8 @@ async function createSharedMailbox(ps: PowerShellSession): Promise<void> {
 
             if (result.error) {
               errors.push(`${permLabels[perm]}: ${result.error}`);
+            } else {
+              grantedPerms.push(permLabels[perm] ?? perm);
             }
           }
 
@@ -439,6 +513,10 @@ async function createSharedMailbox(ps: PowerShellSession): Promise<void> {
             spin.stop(`Failed to grant permissions to ${user.DisplayName}.`);
             for (const err of errors) p.log.error(err);
           }
+
+          if (grantedPerms.length > 0) {
+            addedUsers.push({ name: user.DisplayName, upn: user.UserPrincipalName, perms: grantedPerms });
+          }
         }
       }
     }
@@ -448,6 +526,30 @@ async function createSharedMailbox(ps: PowerShellSession): Promise<void> {
     [`Name:  ${displayName}`, `Email: ${emailResult.email}`].join("\n"),
     "Shared mailbox created",
   );
+
+  // Ticket note clipboard option
+  let ticketNote = `Created shared mailbox ${displayName} (${emailResult.email}).`;
+  if (addedUsers.length > 0) {
+    ticketNote += `\nAdded users with permissions:`;
+    for (const u of addedUsers) {
+      ticketNote += `\n  - ${u.name} (${u.upn}) — ${u.perms.join(", ")}`;
+    }
+  }
+
+  const mbAction = await p.select({
+    message: "Next",
+    options: [
+      { value: "copy-ticket", label: "Copy ticket update note to clipboard" },
+      { value: "done", label: "Done" },
+    ],
+  });
+  if (!p.isCancel(mbAction) && mbAction === "copy-ticket") {
+    if (await copyToClipboard(ps, ticketNote)) {
+      p.log.success("Ticket update note copied to clipboard.");
+    } else {
+      p.log.info(ticketNote);
+    }
+  }
 }
 
 export async function run(ps: PowerShellSession): Promise<void> {

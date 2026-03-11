@@ -121,6 +121,8 @@ export async function run(ps: PowerShellSession): Promise<void> {
     const available = sub.TotalLicenses - assigned;
 
     return {
+      subscriptionId: sub.Id,
+      skuPartNumber: sub.SkuPartNumber,
       name: friendlySkuName(sub.SkuPartNumber),
       status: sub.Status,
       totalSeats: sub.TotalLicenses,
@@ -128,6 +130,7 @@ export async function run(ps: PowerShellSession): Promise<void> {
       available,
       trial: sub.IsTrial ? "Yes" : "No",
       renewalDate: formatDate(sub.NextLifecycleDateTime),
+      rawRenewalDate: sub.NextLifecycleDateTime,
       daysUntilRenewal: daysUntil(sub.NextLifecycleDateTime),
     };
   });
@@ -207,4 +210,64 @@ export async function run(ps: PowerShellSession): Promise<void> {
 
   const folder = dirname(fullPath);
   try { Bun.spawn(process.platform === "win32" ? ["explorer", folder] : ["open", folder]); } catch {}
+
+  // 7. Calendar reminders
+  const renewableRows = rows.filter((r) => r.rawRenewalDate && r.daysUntilRenewal !== null);
+  if (renewableRows.length === 0) return;
+
+  const createReminders = await p.confirm({
+    message: "Create calendar reminders for upcoming renewals?",
+    initialValue: false,
+  });
+  if (p.isCancel(createReminders) || !createReminders) return;
+
+  const selected = await p.multiselect({
+    message: "Select subscriptions to create reminders for:",
+    options: renewableRows.map((r) => ({
+      value: r,
+      label: r.name,
+      hint: `renews ${r.renewalDate} (${r.daysUntilRenewal} days)`,
+    })),
+  });
+  if (p.isCancel(selected)) return;
+
+  const tenantDomain = ps.tenantDomain ?? "Unknown";
+  const icsDir = join(outputDir, "calendar reminders");
+  mkdirSync(icsDir, { recursive: true });
+  try { chmodSync(icsDir, 0o700); } catch {}
+
+  for (const row of selected) {
+    const startDate = new Date(row.rawRenewalDate!);
+    const endDate = new Date(startDate);
+    endDate.setDate(endDate.getDate() + 1);
+
+    const dtstart = startDate.toISOString().slice(0, 10).replace(/-/g, "");
+    const dtend = endDate.toISOString().slice(0, 10).replace(/-/g, "");
+    const uid = `${row.subscriptionId}-${tenantSlug}@m365-admin-cli`;
+
+    const ics = [
+      "BEGIN:VCALENDAR",
+      "VERSION:2.0",
+      "PRODID:-//M365 Admin CLI//EN",
+      "BEGIN:VEVENT",
+      `UID:${uid}`,
+      `DTSTART;VALUE=DATE:${dtstart}`,
+      `DTEND;VALUE=DATE:${dtend}`,
+      `SUMMARY:License Renewal: ${row.name} — ${tenantDomain}`,
+      `DESCRIPTION:Subscription renewal/expiry for ${row.name}\\nTenant: ${tenantDomain}\\nSeats: ${row.totalSeats} (${row.assigned} assigned)\\nStatus: ${row.status}`,
+      "BEGIN:VALARM",
+      "TRIGGER:-P7D",
+      "ACTION:DISPLAY",
+      "DESCRIPTION:License renewal in 7 days",
+      "END:VALARM",
+      "END:VEVENT",
+      "END:VCALENDAR",
+    ].join("\r\n");
+
+    const icsPath = join(icsDir, `${tenantSlug}-renewal-${row.skuPartNumber}.ics`);
+    await Bun.write(icsPath, ics);
+    try { chmodSync(icsPath, 0o600); } catch {}
+  }
+
+  p.log.success(`Created ${selected.length} calendar reminder(s) in ${icsDir}`);
 }
