@@ -2,7 +2,7 @@
 
 ## High Value, Easy to Build
 
-- [ ] **License Usage Report** — All SKUs with total/consumed/available seats, cost per license, users assigned to each. Helps identify wasted spend. (`Get-MgSubscribedSku` + `Get-MgUser` with license details)
+- [x] **License Usage Report** — All SKUs with total/consumed/available seats, cost per license, users assigned to each. Helps identify wasted spend. (`Get-MgSubscribedSku` + `Get-MgUser` with license details)
 
 - [ ] **Distribution Group Audit** — All distribution groups with member counts, owners, email addresses. Flags empty groups and groups with only one member. (`Get-DistributionGroup` + `Get-DistributionGroupMember`)
 
@@ -10,7 +10,7 @@
 
 - [ ] **Guest User Audit** — All external/guest users (#EXT#), when created, last sign-in, which groups they belong to. Common compliance requirement. (Graph `Get-MgUser -Filter "userType eq 'Guest'"` + sign-in activity)
 
-- [ ] **Admin Role Report** — Users with admin roles (Global Admin, Exchange Admin, etc.) and whether they have MFA enabled. Security audit essential. (`Get-MgDirectoryRole` + `Get-MgDirectoryRoleMember`)
+- [x] **Admin Role Report** — Users with admin roles (Global Admin, Exchange Admin, etc.) and whether they have MFA enabled. Security audit essential. (`Get-MgDirectoryRole` + `Get-MgDirectoryRoleMember`)
 
 ## Medium Effort, Very Useful
 
@@ -24,10 +24,10 @@
 
 ## Stretch Goals
 
-- [ ] **Mailbox Permissions Matrix** — Cross-reference of who has access to which shared mailboxes (full access + send-as).
+- [x] **Mailbox Permissions Matrix** — Cross-reference of who has access to which shared mailboxes (full access + send-as).
 
 - [ ] **Password & MFA Status Report** — Users with/without MFA, password age, password never expires flag. Requires `AuthenticationMethod.Read.All` scope addition.
 
 ## UX Improvements
 
-- [ ] **Clipboard Copy for Ticket Notes** — After actions (user created, deleted, license changed, etc.), auto-copy a summary note to clipboard so it can be pasted into the ticketing system. Use `pbcopy` on macOS, `clip` on Windows.
+- [x] **Clipboard Copy for Ticket Notes** — After actions (user created, deleted, license changed, etc.), auto-copy a summary note to clipboard so it can be pasted into the ticketing system. Use `pbcopy` on macOS, `clip` on Windows.

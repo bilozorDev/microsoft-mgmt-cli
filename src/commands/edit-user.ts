@@ -11,6 +11,7 @@ interface MgUser {
   DisplayName: string;
   UserPrincipalName: string;
   Id: string;
+  LicenseCount: number;
 }
 
 interface MgUserDetails {
@@ -25,6 +26,11 @@ interface MgUserDetails {
 interface LicenseDetail {
   SkuPartNumber: string;
   SkuId: string;
+}
+
+interface AcceptedDomain {
+  DomainName: string;
+  Default: boolean;
 }
 
 interface SubscribedSku {
@@ -47,7 +53,7 @@ async function fetchUsers(ps: PowerShellSession): Promise<MgUser[]> {
 
   if (count <= 50) {
     const raw = await ps.runCommandJson<MgUser | MgUser[]>(
-      "Get-MgUser -All -Property DisplayName,UserPrincipalName,Id | Select-Object DisplayName,UserPrincipalName,Id",
+      "Get-MgUser -All -Property DisplayName,UserPrincipalName,Id,AssignedLicenses | ForEach-Object { [PSCustomObject]@{ DisplayName = $_.DisplayName; UserPrincipalName = $_.UserPrincipalName; Id = $_.Id; LicenseCount = $_.AssignedLicenses.Count } }",
     );
     users = raw ? (Array.isArray(raw) ? raw : [raw]) : [];
     spin.stop(`Found ${users.length} user(s).`);
@@ -65,7 +71,7 @@ async function fetchUsers(ps: PowerShellSession): Promise<MgUser[]> {
       searchSpin.start("Searching users...");
       try {
         const raw = await ps.runCommandJson<MgUser | MgUser[]>(
-          `Get-MgUser -Search '"displayName:${escapePS(query)}"' -ConsistencyLevel eventual -Property DisplayName,UserPrincipalName,Id | Select-Object DisplayName,UserPrincipalName,Id`,
+          `Get-MgUser -Search '"displayName:${escapePS(query)}"' -ConsistencyLevel eventual -Property DisplayName,UserPrincipalName,Id,AssignedLicenses | ForEach-Object { [PSCustomObject]@{ DisplayName = $_.DisplayName; UserPrincipalName = $_.UserPrincipalName; Id = $_.Id; LicenseCount = $_.AssignedLicenses.Count } }`,
         );
         users = raw ? (Array.isArray(raw) ? raw : [raw]) : [];
         searchSpin.stop(`Found ${users.length} user(s).`);
@@ -99,7 +105,7 @@ async function selectUser(
     options: users.map((u) => ({
       value: u.Id,
       label: u.DisplayName,
-      hint: u.UserPrincipalName,
+      hint: u.LicenseCount > 0 ? u.UserPrincipalName : `${u.UserPrincipalName} (not licensed)`,
     })),
   });
   if (p.isCancel(userId)) return null;
@@ -177,7 +183,7 @@ export async function run(ps: PowerShellSession): Promise<void> {
   if (!user) return;
 
   const userId = user.Id;
-  const upn = user.UserPrincipalName;
+  let upn = user.UserPrincipalName;
 
   // 3. Show current details
   let current = await fetchUserDetails(ps, userId);
@@ -194,10 +200,15 @@ export async function run(ps: PowerShellSession): Promise<void> {
   const addedSecGroups: { name: string; email: string }[] = [];
   const addedMailboxes: { name: string; email: string }[] = [];
   let otsUrl: string | null = null;
+  let domainChangedFrom: string | null = null;
+  const aliasesAdded: string[] = [];
+  let acceptedDomains: AcceptedDomain[] | null = null;
 
   while (true) {
-    const menuOptions: { value: string; label: string }[] = [
+    const menuOptions: { value: string; label: string; hint?: string }[] = [
       { value: "edit-name", label: "Edit name" },
+      { value: "change-domain", label: "Change primary domain", hint: upn.split("@")[1] },
+      { value: "add-alias", label: "Add email alias" },
       { value: "reset-password", label: "Reset password" },
       { value: "manage-licenses", label: "Manage licenses" },
       { value: "add-distribution-group", label: "Add to distribution group" },
@@ -449,6 +460,135 @@ export async function run(ps: PowerShellSession): Promise<void> {
         break;
       }
 
+      case "change-domain": {
+        const currentUsername = upn.split("@")[0]!;
+        const currentDomain = upn.split("@")[1]!;
+
+        if (!acceptedDomains) {
+          const domainSpin = p.spinner();
+          domainSpin.start("Fetching accepted domains...");
+          try {
+            const raw = await ps.runCommandJson<AcceptedDomain | AcceptedDomain[]>(
+              "Get-AcceptedDomain | Select-Object DomainName, Default",
+            );
+            acceptedDomains = raw ? (Array.isArray(raw) ? raw : [raw]) : [];
+            domainSpin.stop(`Found ${acceptedDomains.length} domain(s).`);
+          } catch (e) {
+            domainSpin.stop("Failed to fetch domains.");
+            p.log.error(`${e}`);
+            break;
+          }
+        }
+
+        const otherDomains = acceptedDomains.filter(
+          (d) => d.DomainName.toLowerCase() !== currentDomain.toLowerCase(),
+        );
+        if (otherDomains.length === 0) {
+          p.log.warn("No other domains available in this tenant.");
+          break;
+        }
+
+        const newDomain = await p.select({
+          message: "Select new domain",
+          options: otherDomains.map((d) => ({
+            value: d.DomainName,
+            label: d.DomainName,
+            hint: d.Default ? "default" : undefined,
+          })),
+        });
+        if (p.isCancel(newDomain)) break;
+
+        const newUpn = `${currentUsername}@${newDomain}`;
+        const confirm = await p.confirm({
+          message: `Change ${upn} → ${newUpn}? This will affect sign-in.`,
+        });
+        if (p.isCancel(confirm) || !confirm) break;
+
+        const oldUpn = upn;
+        const spin = p.spinner();
+        spin.start("Updating UPN...");
+        const { error } = await ps.runCommand(
+          `Update-MgUser -UserId '${escapePS(userId)}' -UserPrincipalName '${escapePS(newUpn)}'`,
+        );
+        if (error) {
+          spin.stop("Failed to update UPN.");
+          p.log.error(error);
+          break;
+        }
+        spin.stop(`UPN changed to ${newUpn}.`);
+
+        // Add old address as alias (use old UPN as identity since Exchange may not recognize new UPN yet)
+        // Graph dual-write already updates the primary SMTP when UPN changes
+        const aliasSpin = p.spinner();
+        aliasSpin.start("Adding old address as alias...");
+        const { error: aliasError } = await ps.runCommand(
+          `Set-Mailbox -Identity '${escapePS(oldUpn)}' -EmailAddresses @{Add='smtp:${escapePS(oldUpn)}'}`,
+        );
+        if (aliasError) {
+          aliasSpin.stop("Could not add old address as alias.");
+          p.log.warn(`Old address may not be preserved as alias. You can add it manually.\n${aliasError}`);
+        } else {
+          aliasSpin.stop(`Old address ${oldUpn} preserved as alias.`);
+        }
+
+        upn = newUpn;
+        current.details.UserPrincipalName = newUpn;
+        if (!domainChangedFrom) domainChangedFrom = oldUpn;
+        break;
+      }
+
+      case "add-alias": {
+        const aliasUsername = await p.text({
+          message: "Alias username (before @)",
+          validate: (v = "") => {
+            if (!v.trim()) return "Username is required";
+            if (/[^a-zA-Z0-9._-]/.test(v)) return "Invalid characters in username";
+          },
+        });
+        if (p.isCancel(aliasUsername)) break;
+
+        if (!acceptedDomains) {
+          const domainSpin = p.spinner();
+          domainSpin.start("Fetching accepted domains...");
+          try {
+            const raw = await ps.runCommandJson<AcceptedDomain | AcceptedDomain[]>(
+              "Get-AcceptedDomain | Select-Object DomainName, Default",
+            );
+            acceptedDomains = raw ? (Array.isArray(raw) ? raw : [raw]) : [];
+            domainSpin.stop(`Found ${acceptedDomains.length} domain(s).`);
+          } catch (e) {
+            domainSpin.stop("Failed to fetch domains.");
+            p.log.error(`${e}`);
+            break;
+          }
+        }
+
+        const aliasDomain = await p.select({
+          message: "Domain for alias",
+          options: acceptedDomains.map((d) => ({
+            value: d.DomainName,
+            label: d.DomainName,
+            hint: d.Default ? "default" : undefined,
+          })),
+        });
+        if (p.isCancel(aliasDomain)) break;
+
+        const aliasAddress = `${aliasUsername}@${aliasDomain}`;
+        const spin = p.spinner();
+        spin.start(`Adding alias ${aliasAddress}...`);
+        const { error } = await ps.runCommand(
+          `Set-Mailbox -Identity '${escapePS(upn)}' -EmailAddresses @{Add='smtp:${escapePS(aliasAddress)}'}`,
+        );
+        if (error) {
+          spin.stop("Failed to add alias.");
+          p.log.error(error);
+        } else {
+          spin.stop(`Alias ${aliasAddress} added.`);
+          aliasesAdded.push(aliasAddress);
+        }
+        break;
+      }
+
       case "copy-ots": {
         try {
           if (process.platform === "win32") {
@@ -475,6 +615,12 @@ export async function run(ps: PowerShellSession): Promise<void> {
         }
         if (nameChangedTo) {
           lines.push(`Changed display name to ${nameChangedTo}.`);
+        }
+        if (domainChangedFrom) {
+          lines.push(`Changed primary domain from ${domainChangedFrom} to ${upn}.`);
+        }
+        if (aliasesAdded.length > 0) {
+          lines.push(`Added email alias(es): ${aliasesAdded.join(", ")}.`);
         }
         if (licensesAdded.length > 0) {
           lines.push(`Added license(s): ${licensesAdded.join(", ")}.`);

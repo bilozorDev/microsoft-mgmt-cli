@@ -7,6 +7,7 @@ interface MgUser {
   DisplayName: string;
   UserPrincipalName: string;
   Id: string;
+  LicenseCount: number;
 }
 
 interface LicenseDetail {
@@ -60,7 +61,7 @@ async function fetchUsers(
 
   if (count <= 50) {
     const raw = await ps.runCommandJson<MgUser | MgUser[]>(
-      "Get-MgUser -All -Property DisplayName,UserPrincipalName,Id | Select-Object DisplayName,UserPrincipalName,Id",
+      "Get-MgUser -All -Property DisplayName,UserPrincipalName,Id,AssignedLicenses | ForEach-Object { [PSCustomObject]@{ DisplayName = $_.DisplayName; UserPrincipalName = $_.UserPrincipalName; Id = $_.Id; LicenseCount = $_.AssignedLicenses.Count } }",
     );
     users = raw ? (Array.isArray(raw) ? raw : [raw]) : [];
   } else {
@@ -77,7 +78,7 @@ async function fetchUsers(
       searchSpin.start("Searching users...");
       try {
         const raw = await ps.runCommandJson<MgUser | MgUser[]>(
-          `Get-MgUser -Search '"displayName:${escapePS(query)}"' -ConsistencyLevel eventual -Property DisplayName,UserPrincipalName,Id | Select-Object DisplayName,UserPrincipalName,Id`,
+          `Get-MgUser -Search '"displayName:${escapePS(query)}"' -ConsistencyLevel eventual -Property DisplayName,UserPrincipalName,Id,AssignedLicenses | ForEach-Object { [PSCustomObject]@{ DisplayName = $_.DisplayName; UserPrincipalName = $_.UserPrincipalName; Id = $_.Id; LicenseCount = $_.AssignedLicenses.Count } }`,
         );
         users = raw ? (Array.isArray(raw) ? raw : [raw]) : [];
         searchSpin.stop(`Found ${users.length} user(s).`);
@@ -126,7 +127,7 @@ async function selectUser(
     options: users.map((u) => ({
       value: u.Id,
       label: u.DisplayName,
-      hint: u.UserPrincipalName,
+      hint: u.LicenseCount > 0 ? u.UserPrincipalName : `${u.UserPrincipalName} (not licensed)`,
     })),
   });
   if (p.isCancel(userId)) return null;
@@ -153,7 +154,7 @@ async function selectMultipleUsers(
       options: users.map((u) => ({
         value: u.Id,
         label: u.DisplayName,
-        hint: u.UserPrincipalName,
+        hint: u.LicenseCount > 0 ? u.UserPrincipalName : `${u.UserPrincipalName} (not licensed)`,
       })),
       required: true,
     });
