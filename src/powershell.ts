@@ -57,11 +57,8 @@ export class PowerShellSession {
     "User.ReadWrite.All",
     "Organization.Read.All",
     "Directory.ReadWrite.All",
-    "RoleManagement.Read.Directory",
     "Group.ReadWrite.All",
     "GroupMember.ReadWrite.All",
-    "AuditLog.Read.All",
-    "UserAuthenticationMethod.ReadWrite.All",
     "User-PasswordProfile.ReadWrite.All",
   ];
   tenantDomain: string | null = null;
