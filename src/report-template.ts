@@ -10,7 +10,7 @@ export interface ReportOptions {
   tenant: string;
   summary: string;
   columns: { header: string; width: number; wrapText?: boolean }[];
-  rows: string[][];
+  rows: (string | number)[][];
 }
 
 /**

@@ -10,6 +10,7 @@ import { run as sharedMailboxes } from "./commands/shared-mailboxes.ts";
 import { run as forwardingAudit } from "./commands/forwarding-audit.ts";
 import { run as adminRoles } from "./commands/admin-roles.ts";
 import { run as usersReport } from "./commands/users-report.ts";
+import { run as licenseReport } from "./commands/license-report.ts";
 import { run as createGroup } from "./commands/create-group.ts";
 import { run as editGroup } from "./commands/edit-group.ts";
 import { run as deleteGroup } from "./commands/delete-group.ts";
@@ -134,6 +135,7 @@ async function main() {
           { value: "forwarding-audit", label: "Forwarding audit", hint: "security & compliance" },
           { value: "admin-roles", label: "Admin role report", hint: "security audit" },
           { value: "users-report", label: "Licensed users report", hint: "licenses, MFA, mailbox size" },
+          { value: "license-report", label: "License & subscription report", hint: "expiration, renewal, usage" },
           { value: "back", label: "Back" },
         ],
       });
@@ -155,6 +157,9 @@ async function main() {
           break;
         case "users-report":
           await usersReport(ps);
+          break;
+        case "license-report":
+          await licenseReport(ps);
           break;
       }
     }
