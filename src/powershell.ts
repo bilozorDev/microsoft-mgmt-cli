@@ -40,27 +40,8 @@ while ($true) {
 export class PowerShellSession {
   private process: Subprocess<"pipe", "pipe", "inherit"> | null = null;
   private decoder = new TextDecoder();
-  private graphScopeLevel: "none" | "read" | "readwrite" = "none";
-
-  private static readonly READ_SCOPES = [
-    "User.Read.All",
-    "Organization.Read.All",
-    "Directory.Read.All",
-    "RoleManagement.Read.Directory",
-    "Group.Read.All",
-    "GroupMember.Read.All",
-    "AuditLog.Read.All",
-    "UserAuthenticationMethod.Read.All",
-  ];
-
-  private static readonly READWRITE_SCOPES = [
-    "User.ReadWrite.All",
-    "Organization.Read.All",
-    "Directory.ReadWrite.All",
-    "Group.ReadWrite.All",
-    "GroupMember.ReadWrite.All",
-    "User-PasswordProfile.ReadWrite.All",
-  ];
+  private grantedScopes = new Set<string>();
+  tenantId: string | null = null;
   tenantDomain: string | null = null;
 
   async start(): Promise<void> {
@@ -145,40 +126,88 @@ export class PowerShellSession {
     return JSON.parse(output) as T;
   }
 
-  async ensureGraphConnected(needsWrite = false): Promise<void> {
-    if (this.graphScopeLevel === "readwrite") return;
-    if (this.graphScopeLevel === "read" && !needsWrite) return;
+  private isScopeCovered(scope: string): boolean {
+    if (this.grantedScopes.has(scope)) return true;
+    // ReadWrite covers Read (e.g. User.ReadWrite.All covers User.Read.All)
+    const rwVariant = scope.replace(".Read.", ".ReadWrite.");
+    if (rwVariant !== scope && this.grantedScopes.has(rwVariant)) return true;
+    return false;
+  }
 
-    // Disconnect existing session if upgrading from read to readwrite
-    if (this.graphScopeLevel === "read" && needsWrite) {
+  async ensureGraphConnected(requiredScopes: string[]): Promise<void> {
+    const missing = requiredScopes.filter((s) => !this.isScopeCovered(s));
+    if (missing.length === 0) return;
+
+    if (this.grantedScopes.size > 0) {
       try {
         await this.runCommand("Disconnect-MgGraph *>$null");
       } catch {
         // Best-effort disconnect
       }
-      this.graphScopeLevel = "none";
     }
 
-    const scopes = needsWrite
-      ? PowerShellSession.READWRITE_SCOPES
-      : PowerShellSession.READ_SCOPES;
-    const scopeStr = scopes.map((s) => `"${s}"`).join(",");
-    const { error } = await this.runCommand(
-      `Connect-MgGraph -Scopes ${scopeStr} -NoWelcome`,
-    );
+    const allScopes = new Set([...this.grantedScopes, ...requiredScopes]);
+    const scopeStr = [...allScopes].map((s) => `"${s}"`).join(",");
+    let graphCmd = `Connect-MgGraph -Scopes ${scopeStr} -ContextScope Process -NoWelcome`;
+    if (this.tenantId) {
+      graphCmd += ` -TenantId '${this.tenantId.replace(/'/g, "''")}'`;
+    }
+
+    const { error } = await this.runCommand(graphCmd);
     if (error) {
       throw new Error(`Failed to connect to Microsoft Graph: ${error}`);
     }
-    this.graphScopeLevel = needsWrite ? "readwrite" : "read";
+
+    // Verify Graph connected to the same tenant as Exchange Online
+    if (this.tenantId) {
+      const { output: graphTenant } = await this.runCommand(
+        "Get-MgContext | Select-Object -ExpandProperty TenantId",
+      );
+      if (graphTenant.trim() && graphTenant.trim() !== this.tenantId) {
+        throw new Error(
+          `Tenant mismatch: Exchange Online is connected to ${this.tenantId} but Graph connected to ${graphTenant.trim()}. Please restart the app and authenticate with the correct account.`,
+        );
+      }
+    }
+
+    this.grantedScopes = allScopes;
   }
 
   async connectExchangeOnline(): Promise<void> {
-    const { error } = await this.runCommand(
-      "Connect-ExchangeOnline -ShowBanner:$false",
-    );
+    let cmd = "Connect-ExchangeOnline -ShowBanner:$false";
+
+    // On Windows, disable WAM to prevent OS-level cached account auto-selection
+    const useDisableWam = process.platform === "win32";
+    if (useDisableWam) {
+      cmd += " -DisableWAM";
+    }
+
+    const { error } = await this.runCommand(cmd);
+
     if (error) {
+      // If -DisableWAM is not recognized (EXO module < 3.7.2), retry without it
+      if (useDisableWam && error.includes("DisableWAM")) {
+        const fallback = await this.runCommand(
+          "Connect-ExchangeOnline -ShowBanner:$false",
+        );
+        if (fallback.error) {
+          throw new Error(`Failed to connect to Exchange Online: ${fallback.error}`);
+        }
+        return;
+      }
       throw new Error(`Failed to connect to Exchange Online: ${error}`);
     }
+  }
+
+  async extractTenantId(): Promise<string | null> {
+    const { output, error } = await this.runCommand(
+      "Get-ConnectionInformation | Select-Object -First 1 -ExpandProperty TenantID",
+    );
+    if (error || !output.trim()) {
+      return null;
+    }
+    this.tenantId = output.trim();
+    return this.tenantId;
   }
 
   async getTenantDomain(): Promise<string> {
@@ -193,13 +222,15 @@ export class PowerShellSession {
   }
 
   async switchTenant(): Promise<void> {
-    if (this.graphScopeLevel !== "none") {
+    this.tenantId = null;
+
+    if (this.grantedScopes.size > 0) {
       try {
         await this.runCommand("Disconnect-MgGraph *>$null");
       } catch {
         // Best-effort disconnect
       }
-      this.graphScopeLevel = "none";
+      this.grantedScopes = new Set();
     }
 
     try {
@@ -209,19 +240,20 @@ export class PowerShellSession {
     }
 
     await this.connectExchangeOnline();
+    await this.extractTenantId();
     await this.getTenantDomain();
   }
 
   async end(): Promise<void> {
     if (!this.process) return;
 
-    if (this.graphScopeLevel !== "none") {
+    if (this.grantedScopes.size > 0) {
       try {
         await this.runCommand("Disconnect-MgGraph *>$null");
       } catch {
         // Best-effort disconnect
       }
-      this.graphScopeLevel = "none";
+      this.grantedScopes = new Set();
     }
 
     try {
@@ -239,5 +271,6 @@ export class PowerShellSession {
 
     this.process = null;
     this.tenantDomain = null;
+    this.tenantId = null;
   }
 }

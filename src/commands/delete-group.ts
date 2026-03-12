@@ -127,7 +127,7 @@ async function deleteSecurityGroup(ps: PowerShellSession): Promise<void> {
   const graphSpin = p.spinner();
   graphSpin.start("Connecting to Microsoft Graph (check your browser)...");
   try {
-    await ps.ensureGraphConnected(true);
+    await ps.ensureGraphConnected(["Group.ReadWrite.All"]);
     graphSpin.stop("Connected to Microsoft Graph.");
   } catch (e) {
     graphSpin.stop("Failed to connect to Microsoft Graph.");

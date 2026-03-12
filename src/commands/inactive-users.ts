@@ -68,7 +68,7 @@ export async function run(ps: PowerShellSession): Promise<void> {
   const spin = p.spinner();
   spin.start("Connecting to Microsoft Graph…");
   try {
-    await ps.ensureGraphConnected();
+    await ps.ensureGraphConnected(["User.Read.All", "Organization.Read.All", "AuditLog.Read.All"]);
   } catch (e: any) {
     spin.stop("Failed to connect to Microsoft Graph.");
     p.log.error(e.message);

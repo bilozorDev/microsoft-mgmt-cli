@@ -202,7 +202,7 @@ async function editDistributionGroup(ps: PowerShellSession): Promise<void> {
   const graphSpin = p.spinner();
   graphSpin.start("Connecting to Microsoft Graph...");
   try {
-    await ps.ensureGraphConnected();
+    await ps.ensureGraphConnected(["User.Read.All"]);
     graphSpin.stop("Connected to Microsoft Graph.");
   } catch (e) {
     graphSpin.stop("Failed to connect to Microsoft Graph.");
@@ -422,7 +422,7 @@ async function editSecurityGroup(ps: PowerShellSession): Promise<void> {
   const graphSpin = p.spinner();
   graphSpin.start("Connecting to Microsoft Graph (check your browser)...");
   try {
-    await ps.ensureGraphConnected(true);
+    await ps.ensureGraphConnected(["User.Read.All", "Group.ReadWrite.All", "GroupMember.ReadWrite.All"]);
     graphSpin.stop("Connected to Microsoft Graph.");
   } catch (e) {
     graphSpin.stop("Failed to connect to Microsoft Graph.");
@@ -743,7 +743,7 @@ async function editSharedMailbox(ps: PowerShellSession): Promise<void> {
   const graphSpin = p.spinner();
   graphSpin.start("Connecting to Microsoft Graph...");
   try {
-    await ps.ensureGraphConnected();
+    await ps.ensureGraphConnected(["User.Read.All"]);
     graphSpin.stop("Connected to Microsoft Graph.");
   } catch (e) {
     graphSpin.stop("Failed to connect to Microsoft Graph.");

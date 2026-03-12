@@ -54,7 +54,7 @@ export async function run(ps: PowerShellSession): Promise<void> {
   spin.start("Checking for unnecessary licenses…");
   let licenseMap = new Map<string, string[]>(); // UPN → friendly license names
   try {
-    await ps.ensureGraphConnected();
+    await ps.ensureGraphConnected(["User.Read.All", "Organization.Read.All"]);
 
     // Build filter for shared mailbox UPNs
     const upns = mailboxes.map((m) => m.PrimarySmtpAddress);

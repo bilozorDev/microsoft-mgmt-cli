@@ -2,6 +2,10 @@ import * as p from "@clack/prompts";
 import { PowerShellSession } from "./powershell.ts";
 import { checkRequirements } from "./requirements.ts";
 import { run as whitelistDomain } from "./commands/whitelist-domain.ts";
+import { run as blockSender } from "./commands/block-sender.ts";
+import { run as quarantineManagement } from "./commands/quarantine-management.ts";
+import { run as messageTrace } from "./commands/message-trace.ts";
+import { run as dkimAudit } from "./commands/dkim-audit.ts";
 import { run as createUser } from "./commands/create-user.ts";
 import { run as editUser } from "./commands/edit-user.ts";
 import { run as deleteUser } from "./commands/delete-user.ts";
@@ -14,6 +18,7 @@ import { run as licenseReport } from "./commands/license-report.ts";
 import { run as createGroup } from "./commands/create-group.ts";
 import { run as editGroup } from "./commands/edit-group.ts";
 import { run as deleteGroup } from "./commands/delete-group.ts";
+import { run as emergencyResponse } from "./commands/emergency-response.ts";
 import { checkForUpdates } from "./auto-update.ts";
 import pkg from "../package.json";
 
@@ -60,6 +65,9 @@ async function main() {
     process.exit(1);
   }
 
+  // Extract tenant ID for Graph isolation
+  await ps.extractTenantId();
+
   // Fetch tenant domain
   try {
     const domain = await ps.getTenantDomain();
@@ -75,8 +83,9 @@ async function main() {
       options: [
         { value: "user-management", label: "User Management" },
         { value: "group-management", label: "Groups & Shared Mailbox Management" },
-        { value: "spam-management", label: "Spam Management" },
+        { value: "email-security", label: "Email Security" },
         { value: "reports", label: "Reports" },
+        { value: "emergency-response", label: "Emergency Response", hint: "compromised account" },
         { value: "switch-tenant", label: "Switch tenant", hint: ps.tenantDomain ? `connected to ${ps.tenantDomain}` : undefined },
         { value: "exit", label: "Exit" },
       ],
@@ -191,11 +200,15 @@ async function main() {
       }
     }
 
-    if (category === "spam-management") {
+    if (category === "email-security") {
       const action = await p.select({
-        message: "Spam Management",
+        message: "Email Security",
         options: [
           { value: "whitelist-domain", label: "Whitelist domain(s)" },
+          { value: "block-sender", label: "Block sender/domain(s)" },
+          { value: "quarantine", label: "Quarantine management" },
+          { value: "message-trace", label: "Message trace" },
+          { value: "dkim-audit", label: "DKIM / Email authentication" },
           { value: "back", label: "Back" },
         ],
       });
@@ -206,7 +219,23 @@ async function main() {
         case "whitelist-domain":
           await whitelistDomain(ps);
           break;
+        case "block-sender":
+          await blockSender(ps);
+          break;
+        case "quarantine":
+          await quarantineManagement(ps);
+          break;
+        case "message-trace":
+          await messageTrace(ps);
+          break;
+        case "dkim-audit":
+          await dkimAudit(ps);
+          break;
       }
+    }
+
+    if (category === "emergency-response") {
+      await emergencyResponse(ps);
     }
   }
 

@@ -13,7 +13,7 @@ export async function run(ps: PowerShellSession, upn: string): Promise<{ name: s
   const graphSpin = p.spinner();
   graphSpin.start("Connecting to Microsoft Graph...");
   try {
-    await ps.ensureGraphConnected(true);
+    await ps.ensureGraphConnected(["User.Read.All", "Group.ReadWrite.All", "GroupMember.ReadWrite.All"]);
     graphSpin.stop("Connected to Microsoft Graph.");
   } catch (e) {
     graphSpin.stop("Failed to connect to Microsoft Graph.");
