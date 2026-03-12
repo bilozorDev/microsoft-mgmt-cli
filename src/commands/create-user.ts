@@ -143,19 +143,16 @@ export async function run(ps: PowerShellSession): Promise<void> {
       return;
     }
 
-    const withSeats = skus.filter(
-      (s) => s.PrepaidUnits.Enabled - s.ConsumedUnits > 0,
-    );
-
-    if (withSeats.length > 0) {
+    if (skus.length > 0) {
       const choices = await p.multiselect({
         message: "Assign licenses (space to toggle, enter to confirm)",
-        options: withSeats.map((s) => {
+        options: skus.map((s) => {
           const available = s.PrepaidUnits.Enabled - s.ConsumedUnits;
           return {
             value: s.SkuId,
             label: friendlySkuName(s.SkuPartNumber),
             hint: `${available} of ${s.PrepaidUnits.Enabled} available`,
+            disabled: available <= 0,
           };
         }),
         required: false,

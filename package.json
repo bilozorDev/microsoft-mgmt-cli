@@ -1,6 +1,6 @@
 {
   "name": "m365-admin-cli",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "module": "src/index.ts",
   "type": "module",
   "private": true,
@@ -16,6 +16,8 @@
   },
   "dependencies": {
     "@clack/prompts": "^1.1.0",
-    "exceljs": "^4.4.0"
+    "@sentry/bun": "^9",
+    "exceljs": "^4.4.0",
+    "posthog-node": "^4"
   }
 }

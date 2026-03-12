@@ -62,12 +62,12 @@ interface IncidentFindings {
   passwordReset: boolean;
   newPassword: string | null;
   sessionsRevoked: boolean;
-  mfaMethodsBefore: string[];
+  mfaMethodsBefore: { name: string; detail: string }[];
   mfaMethodsRemoved: string[];
   forwardingFound: { smtp: string | null; address: string | null; deliverToBoth: boolean } | null;
   forwardingRemoved: boolean;
   forwardingChecked: boolean;
-  inboxRules: { name: string; enabled: boolean; forwardTo: string; redirectTo: string; deleteMessage: boolean }[];
+  inboxRules: { name: string; enabled: boolean; forwardTo: string; redirectTo: string; deleteMessage: boolean; moveToFolder: string; description: string }[];
   inboxRulesChecked: boolean;
   rulesRemoved: string[];
   permissions: { user: string; type: string; rights: string }[];
@@ -85,6 +85,30 @@ const MFA_METHOD_NAMES: Record<string, string> = {
   windowsHelloForBusinessAuthenticationMethod: "Windows Hello",
   temporaryAccessPassAuthenticationMethod: "Temporary Access Pass",
   platformCredentialAuthenticationMethod: "Platform Credential",
+};
+
+/** Per-type detail fetchers — each returns a human-readable detail string. */
+const MFA_DETAIL_CMDS: Record<string, { cmd: (uid: string, mid: string) => string; format: (raw: Record<string, unknown>) => string }> = {
+  microsoftAuthenticatorAuthenticationMethod: {
+    cmd: (uid, mid) =>
+      `Get-MgUserAuthenticationMicrosoftAuthenticatorMethod -UserId '${uid}' -MicrosoftAuthenticatorAuthenticationMethodId '${mid}' | Select-Object DisplayName,DeviceTag,PhoneAppVersion,CreatedDateTime`,
+    format: (r) => [r.DisplayName, r.DeviceTag, r.PhoneAppVersion ? `v${r.PhoneAppVersion}` : null].filter(Boolean).join(", "),
+  },
+  phoneAuthenticationMethod: {
+    cmd: (uid, mid) =>
+      `Get-MgUserAuthenticationPhoneMethod -UserId '${uid}' -PhoneAuthenticationMethodId '${mid}' | Select-Object PhoneNumber,PhoneType`,
+    format: (r) => [r.PhoneNumber, r.PhoneType].filter(Boolean).join(" "),
+  },
+  fido2AuthenticationMethod: {
+    cmd: (uid, mid) =>
+      `Get-MgUserAuthenticationFido2Method -UserId '${uid}' -Fido2AuthenticationMethodId '${mid}' | Select-Object DisplayName,Model,CreatedDateTime`,
+    format: (r) => [r.DisplayName, r.Model].filter(Boolean).join(", "),
+  },
+  emailAuthenticationMethod: {
+    cmd: (uid, mid) =>
+      `Get-MgUserAuthenticationEmailMethod -UserId '${uid}' -EmailAuthenticationMethodId '${mid}' | Select-Object EmailAddress`,
+    format: (r) => String(r.EmailAddress ?? ""),
+  },
 };
 
 const MFA_REMOVE_CMDLETS: Record<string, { cmdlet: string; param: string }> = {
@@ -245,7 +269,7 @@ export async function run(ps: PowerShellSession): Promise<void> {
     passwordReset: false,
     newPassword: null,
     sessionsRevoked: false,
-    mfaMethodsBefore: [],
+    mfaMethodsBefore: [] as { name: string; detail: string }[],
     mfaMethodsRemoved: [],
     forwardingFound: null,
     forwardingRemoved: false,
@@ -316,22 +340,48 @@ export async function run(ps: PowerShellSession): Promise<void> {
           return key !== "passwordAuthenticationMethod" && key in MFA_REMOVE_CMDLETS;
         });
 
-        // Record all methods before removal
-        const allMethodNames = methods
-          .map((m) => m.ODataType ? friendlyMfaMethod(m.ODataType) : null)
-          .filter((n): n is string => n !== null);
-        findings.mfaMethodsBefore = allMethodNames;
-
         if (removable.length === 0) {
           spin.stop("No removable MFA methods found (only password).");
           break;
         }
 
-        const friendlyList = removable
-          .map((m) => friendlyMfaMethod(m.ODataType!))
-          .filter((n): n is string => n !== null);
+        // Fetch details for each method
+        spin.message("Fetching method details...");
+        const methodDetails: { method: AuthMethod; friendly: string; detail: string }[] = [];
 
-        spin.stop(`Found ${removable.length} MFA method(s): ${friendlyList.join(", ")}`);
+        for (const m of removable) {
+          const key = mfaTypeKey(m.ODataType!);
+          const friendly = friendlyMfaMethod(m.ODataType!) ?? key;
+          let detail = "";
+
+          const detailFetcher = MFA_DETAIL_CMDS[key];
+          if (detailFetcher) {
+            try {
+              const raw = await ps.runCommandJson<Record<string, unknown>>(
+                detailFetcher.cmd(escapePS(userId), escapePS(m.Id)),
+              );
+              if (raw) detail = detailFetcher.format(raw);
+            } catch {
+              // detail stays empty
+            }
+          }
+
+          methodDetails.push({ method: m, friendly, detail });
+        }
+
+        // Record all methods before removal (with details)
+        findings.mfaMethodsBefore = methodDetails.map((d) => ({
+          name: d.friendly,
+          detail: d.detail,
+        }));
+
+        spin.stop(`Found ${removable.length} MFA method(s).`);
+
+        // Display methods with details
+        const mfaLines = methodDetails.map((d) =>
+          d.detail ? `${d.friendly}: ${d.detail}` : d.friendly,
+        );
+        p.note(mfaLines.join("\n"), "MFA Methods");
 
         const confirm = await p.confirm({
           message: `Remove all ${removable.length} MFA method(s)? This cannot be undone.`,
@@ -490,6 +540,8 @@ export async function run(ps: PowerShellSession): Promise<void> {
           forwardTo: [r.ForwardTo, r.ForwardAsAttachmentTo].filter(Boolean).join(", ") || "",
           redirectTo: r.RedirectTo ?? "",
           deleteMessage: r.DeleteMessage,
+          moveToFolder: r.MoveToFolder ?? "",
+          description: r.Description ?? "",
         }));
 
         if (rules.length === 0) {
@@ -499,49 +551,50 @@ export async function run(ps: PowerShellSession): Promise<void> {
 
         spin.stop(`Found ${rules.length} inbox rule(s).`);
 
-        // Display rules
+        // Display rules with full detail
         const lines: string[] = [];
         for (const r of rules) {
-          const flags: string[] = [];
-          if (r.ForwardTo) flags.push(`Forward: ${r.ForwardTo}`);
-          if (r.ForwardAsAttachmentTo) flags.push(`Forward (attach): ${r.ForwardAsAttachmentTo}`);
-          if (r.RedirectTo) flags.push(`Redirect: ${r.RedirectTo}`);
-          if (r.DeleteMessage) flags.push("DELETE MESSAGE");
-          if (r.MoveToFolder) flags.push(`Move: ${r.MoveToFolder}`);
-
           const suspicious = r.ForwardTo || r.ForwardAsAttachmentTo || r.RedirectTo || r.DeleteMessage;
           const marker = suspicious ? " [SUSPICIOUS]" : "";
           lines.push(`${r.Enabled ? "[ON] " : "[OFF]"} ${r.Name}${marker}`);
-          if (flags.length > 0) lines.push(`      ${flags.join(" | ")}`);
+
+          // Show actions
+          const actions: string[] = [];
+          if (r.ForwardTo) actions.push(`Forward to: ${r.ForwardTo}`);
+          if (r.ForwardAsAttachmentTo) actions.push(`Forward as attachment to: ${r.ForwardAsAttachmentTo}`);
+          if (r.RedirectTo) actions.push(`Redirect to: ${r.RedirectTo}`);
+          if (r.DeleteMessage) actions.push("Delete message");
+          if (r.MoveToFolder) actions.push(`Move to: ${r.MoveToFolder}`);
+          for (const a of actions) lines.push(`      Action: ${a}`);
+
+          // Show description (contains conditions)
+          if (r.Description) {
+            for (const descLine of r.Description.split("\n").filter((l) => l.trim())) {
+              lines.push(`      ${descLine.trim()}`);
+            }
+          }
+          lines.push("");
         }
-        p.note(lines.join("\n"), "Inbox Rules");
+        p.note(lines.join("\n").trimEnd(), "Inbox Rules");
 
-        // Offer removal of suspicious rules
-        const suspicious = rules.filter(
-          (r) => r.ForwardTo || r.ForwardAsAttachmentTo || r.RedirectTo || r.DeleteMessage,
-        );
+        // Build multiselect with action hints
+        const ruleOptions = rules.map((r) => {
+          const parts: string[] = [];
+          if (r.ForwardTo) parts.push(`fwd: ${r.ForwardTo}`);
+          if (r.ForwardAsAttachmentTo) parts.push(`fwd-attach: ${r.ForwardAsAttachmentTo}`);
+          if (r.RedirectTo) parts.push(`redirect: ${r.RedirectTo}`);
+          if (r.DeleteMessage) parts.push("deletes messages");
+          if (r.MoveToFolder) parts.push(`move: ${r.MoveToFolder}`);
+          const isSuspicious = r.ForwardTo || r.ForwardAsAttachmentTo || r.RedirectTo || r.DeleteMessage;
+          const hint = [isSuspicious ? "SUSPICIOUS" : null, ...parts].filter(Boolean).join(" — ");
+          return { value: r.Identity, label: r.Name, hint: hint || undefined };
+        });
 
-        const rulesToRemove = suspicious.length > 0
-          ? await p.multiselect({
-              message: "Select rules to remove (space to toggle, enter to confirm)",
-              options: rules.map((r) => {
-                const isSuspicious = r.ForwardTo || r.ForwardAsAttachmentTo || r.RedirectTo || r.DeleteMessage;
-                return {
-                  value: r.Identity,
-                  label: r.Name,
-                  hint: isSuspicious ? "suspicious" : undefined,
-                };
-              }),
-              required: false,
-            })
-          : await p.multiselect({
-              message: "Select rules to remove (or press enter to skip)",
-              options: rules.map((r) => ({
-                value: r.Identity,
-                label: r.Name,
-              })),
-              required: false,
-            });
+        const rulesToRemove = await p.multiselect({
+          message: "Select rules to remove (space to toggle, enter to confirm)",
+          options: ruleOptions,
+          required: false,
+        });
 
         if (p.isCancel(rulesToRemove) || rulesToRemove.length === 0) break;
 
@@ -549,7 +602,7 @@ export async function run(ps: PowerShellSession): Promise<void> {
         removeSpin.start("Removing selected rules...");
         for (const identity of rulesToRemove) {
           const { error } = await ps.runCommand(
-            `Remove-InboxRule -Identity '${escapePS(identity)}' -Mailbox '${escapePS(upn)}' -Confirm:$false`,
+            `Remove-InboxRule -Identity '${escapePS(identity)}' -Confirm:$false`,
           );
           if (error) {
             p.log.error(`Failed to remove rule "${identity}": ${error}`);
@@ -630,16 +683,13 @@ export async function run(ps: PowerShellSession): Promise<void> {
         const endDate = new Date().toISOString().slice(0, 19);
         let cmd = `Get-MessageTraceV2 -SenderAddress '${escapePS(upn)}' -StartDate '${startDate}' -EndDate '${endDate}' | Select-Object MessageId,MessageTraceId,SenderAddress,RecipientAddress,Subject,Status,Received,Size`;
 
-        let raw = await ps.runCommandJson<TraceMessage | TraceMessage[]>(cmd);
-
-        // V2 not available — fallback to V1
-        if (raw === null) {
-          const { error } = await ps.runCommand("Get-Command Get-MessageTraceV2 -ErrorAction SilentlyContinue");
-          if (error || !(await ps.runCommand("Get-Command Get-MessageTraceV2 -ErrorAction SilentlyContinue")).output?.trim()) {
-            spin.message("Falling back to Get-MessageTrace (V1)...");
-            cmd = cmd.replace("Get-MessageTraceV2", "Get-MessageTrace");
-            raw = await ps.runCommandJson<TraceMessage | TraceMessage[]>(cmd);
-          }
+        let raw: TraceMessage | TraceMessage[] | null = null;
+        try {
+          raw = await ps.runCommandJson<TraceMessage | TraceMessage[]>(cmd);
+        } catch (e) {
+          spin.stop("Message trace failed.");
+          p.log.error(`${e instanceof Error ? e.message : e}`);
+          break;
         }
 
         const messages = raw ? (Array.isArray(raw) ? raw : [raw]) : [];
@@ -698,10 +748,16 @@ export async function run(ps: PowerShellSession): Promise<void> {
         if (findings.mfaMethodsRemoved.length > 0) {
           lines.push(`[x] MFA methods removed: ${findings.mfaMethodsRemoved.join(", ")}`);
           if (findings.mfaMethodsBefore.length > 0) {
-            lines.push(`    Previous MFA methods: ${findings.mfaMethodsBefore.join(", ")}`);
+            lines.push("    Previous MFA methods:");
+            for (const m of findings.mfaMethodsBefore) {
+              lines.push(`      - ${m.name}${m.detail ? `: ${m.detail}` : ""}`);
+            }
           }
         } else if (findings.mfaMethodsBefore.length > 0) {
           lines.push(`[ ] MFA methods: ${findings.mfaMethodsBefore.length} found, none removed`);
+          for (const m of findings.mfaMethodsBefore) {
+            lines.push(`      - ${m.name}${m.detail ? `: ${m.detail}` : ""}`);
+          }
         } else {
           lines.push("[ ] MFA methods: Not checked");
         }
@@ -734,11 +790,24 @@ export async function run(ps: PowerShellSession): Promise<void> {
         if (findings.inboxRulesChecked) {
           if (findings.inboxRules.length === 0) {
             lines.push("[x] Inbox rules: None found");
-          } else if (findings.rulesRemoved.length > 0) {
-            lines.push(`[x] Inbox rules: ${findings.inboxRules.length} found, ${findings.rulesRemoved.length} removed`);
-            for (const r of findings.rulesRemoved) lines.push(`    Removed: "${r}"`);
           } else {
-            lines.push(`[x] Inbox rules: ${findings.inboxRules.length} found, none removed`);
+            const removedSet = new Set(findings.rulesRemoved);
+            if (findings.rulesRemoved.length > 0) {
+              lines.push(`[x] Inbox rules: ${findings.inboxRules.length} found, ${findings.rulesRemoved.length} removed`);
+            } else {
+              lines.push(`[x] Inbox rules: ${findings.inboxRules.length} found, none removed`);
+            }
+            for (const r of findings.inboxRules) {
+              const wasRemoved = removedSet.has(r.name);
+              const status = wasRemoved ? "REMOVED" : r.enabled ? "active" : "disabled";
+              lines.push(`      - "${r.name}" (${status})`);
+              const actions: string[] = [];
+              if (r.forwardTo) actions.push(`Forward to: ${r.forwardTo}`);
+              if (r.redirectTo) actions.push(`Redirect to: ${r.redirectTo}`);
+              if (r.deleteMessage) actions.push("Delete message");
+              if (r.moveToFolder) actions.push(`Move to: ${r.moveToFolder}`);
+              if (actions.length > 0) lines.push(`        Actions: ${actions.join(", ")}`);
+            }
           }
         } else {
           lines.push("[ ] Inbox rules: Not checked");

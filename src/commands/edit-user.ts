@@ -322,122 +322,115 @@ export async function run(ps: PowerShellSession): Promise<void> {
       }
 
       case "manage-licenses": {
-        const licAction = await p.select({
-          message: "License action",
-          options: [
-            { value: "add", label: "Add license" },
-            { value: "remove", label: "Remove license" },
-          ],
+        const skuSpin = p.spinner();
+        skuSpin.start("Fetching available licenses...");
+
+        let skus: SubscribedSku[];
+        try {
+          const raw = await ps.runCommandJson<SubscribedSku | SubscribedSku[]>(
+            "Get-MgSubscribedSku | Select-Object SkuId, SkuPartNumber, ConsumedUnits, PrepaidUnits",
+          );
+          skus = raw ? (Array.isArray(raw) ? raw : [raw]) : [];
+          skuSpin.stop(`Found ${skus.length} license type(s).`);
+        } catch (e) {
+          skuSpin.stop("Failed to fetch licenses.");
+          p.log.error(`${e}`);
+          break;
+        }
+
+        if (skus.length === 0) {
+          p.log.warn("No license types found in tenant.");
+          break;
+        }
+
+        const currentSkuIds = new Set(current.licenses.map((l) => l.SkuId));
+
+        const choices = await p.multiselect({
+          message: "Toggle licenses (space to toggle, enter to confirm)",
+          options: skus.map((s) => {
+            const avail = s.PrepaidUnits.Enabled - s.ConsumedUnits;
+            const assigned = currentSkuIds.has(s.SkuId);
+            let hint: string;
+            if (assigned && avail <= 0) {
+              hint = "assigned — 0 seats remaining";
+            } else {
+              hint = `${avail} of ${s.PrepaidUnits.Enabled} available`;
+            }
+            return {
+              value: s.SkuId,
+              label: friendlySkuName(s.SkuPartNumber),
+              hint,
+              disabled: avail <= 0 && !assigned,
+            };
+          }),
+          initialValues: skus.filter((s) => currentSkuIds.has(s.SkuId)).map((s) => s.SkuId),
+          required: false,
         });
-        if (p.isCancel(licAction)) break;
+        if (p.isCancel(choices)) break;
 
-        if (licAction === "add") {
-          const skuSpin = p.spinner();
-          skuSpin.start("Fetching available licenses...");
+        const selectedSet = new Set(choices);
+        const toAdd = skus.filter((s) => selectedSet.has(s.SkuId) && !currentSkuIds.has(s.SkuId));
+        const toRemove = skus.filter((s) => !selectedSet.has(s.SkuId) && currentSkuIds.has(s.SkuId));
 
-          let skus: SubscribedSku[];
-          try {
-            const raw = await ps.runCommandJson<SubscribedSku | SubscribedSku[]>(
-              "Get-MgSubscribedSku | Select-Object SkuId, SkuPartNumber, ConsumedUnits, PrepaidUnits",
-            );
-            skus = raw ? (Array.isArray(raw) ? raw : [raw]) : [];
-            skuSpin.stop(`Found ${skus.length} license type(s).`);
-          } catch (e) {
-            skuSpin.stop("Failed to fetch licenses.");
-            p.log.error(`${e}`);
-            break;
-          }
+        if (toAdd.length === 0 && toRemove.length === 0) {
+          p.log.info("No changes.");
+          break;
+        }
 
-          // Exclude already-assigned licenses
-          const currentSkuIds = new Set(current.licenses.map((l) => l.SkuId));
-          const available = skus.filter(
-            (s) => !currentSkuIds.has(s.SkuId) && s.PrepaidUnits.Enabled - s.ConsumedUnits > 0,
-          );
+        // Show summary and confirm
+        const summaryLines: string[] = [];
+        if (toAdd.length > 0) {
+          summaryLines.push(`Add:    ${toAdd.map((s) => friendlySkuName(s.SkuPartNumber)).join(", ")}`);
+        }
+        if (toRemove.length > 0) {
+          summaryLines.push(`Remove: ${toRemove.map((s) => friendlySkuName(s.SkuPartNumber)).join(", ")}`);
+        }
+        p.note(summaryLines.join("\n"), "License changes");
 
-          if (available.length === 0) {
-            p.log.warn("No additional licenses with available seats.");
-            break;
-          }
-
-          const choices = await p.multiselect({
-            message: "Select license(s) to add (space to toggle, enter to confirm)",
-            options: available.map((s) => {
-              const avail = s.PrepaidUnits.Enabled - s.ConsumedUnits;
-              return {
-                value: s.SkuId,
-                label: friendlySkuName(s.SkuPartNumber),
-                hint: `${avail} of ${s.PrepaidUnits.Enabled} available`,
-              };
-            }),
-            required: true,
+        // Extra warning if removing ALL licenses
+        if (toRemove.length > 0 && toRemove.length === current.licenses.length && toAdd.length === 0) {
+          const warnConfirm = await p.confirm({
+            message: "This will remove ALL licenses. User may lose access to data. Are you sure?",
           });
-          if (p.isCancel(choices)) break;
+          if (p.isCancel(warnConfirm) || !warnConfirm) break;
+        } else {
+          const confirm = await p.confirm({ message: "Apply these changes?" });
+          if (p.isCancel(confirm) || !confirm) break;
+        }
 
-          const spin = p.spinner();
-          spin.start("Adding license(s)...");
-          const skuEntries = choices.map((id) => `@{SkuId = '${escapePS(id)}'}`).join(", ");
-          const { error } = await ps.runCommand(
-            `Set-MgUserLicense -UserId '${escapePS(userId)}' -AddLicenses @(${skuEntries}) -RemoveLicenses @()`,
-          );
-          if (error) {
-            spin.stop("Failed to add license(s).");
-            p.log.error(error);
-          } else {
-            const addedNames = choices
-              .map((id) => skus.find((s) => s.SkuId === id))
-              .filter(Boolean)
-              .map((s) => friendlySkuName(s!.SkuPartNumber));
-            spin.stop(`Added: ${addedNames.join(", ")}`);
+        const spin = p.spinner();
+        spin.start("Updating licenses...");
+
+        const addEntries = toAdd.length > 0
+          ? `@(${toAdd.map((s) => `@{SkuId = '${escapePS(s.SkuId)}'}`).join(", ")})`
+          : "@()";
+        const removeEntries = toRemove.length > 0
+          ? `@(${toRemove.map((s) => `'${escapePS(s.SkuId)}'`).join(",")})`
+          : "@()";
+        const { error } = await ps.runCommand(
+          `Set-MgUserLicense -UserId '${escapePS(userId)}' -AddLicenses ${addEntries} -RemoveLicenses ${removeEntries}`,
+        );
+        if (error) {
+          spin.stop("Failed to update licenses.");
+          p.log.error(error);
+        } else {
+          const parts: string[] = [];
+          if (toAdd.length > 0) {
+            const addedNames = toAdd.map((s) => friendlySkuName(s.SkuPartNumber));
+            parts.push(`Added: ${addedNames.join(", ")}`);
             licensesAdded.push(...addedNames);
-            // Update local state
-            for (const id of choices) {
-              const sku = skus.find((s) => s.SkuId === id);
-              if (sku) current.licenses.push({ SkuId: sku.SkuId, SkuPartNumber: sku.SkuPartNumber });
+            for (const s of toAdd) {
+              current.licenses.push({ SkuId: s.SkuId, SkuPartNumber: s.SkuPartNumber });
             }
           }
-        } else {
-          // Remove license
-          if (current.licenses.length === 0) {
-            p.log.warn("User has no licenses to remove.");
-            break;
-          }
-
-          const choices = await p.multiselect({
-            message: "Select license(s) to remove (space to toggle, enter to confirm)",
-            options: current.licenses.map((l) => ({
-              value: l.SkuId,
-              label: friendlySkuName(l.SkuPartNumber),
-            })),
-            required: true,
-          });
-          if (p.isCancel(choices)) break;
-
-          // Warn if removing ALL licenses
-          if (choices.length === current.licenses.length) {
-            const confirm = await p.confirm({
-              message: "This will remove ALL licenses. User may lose access to data. Are you sure?",
-            });
-            if (p.isCancel(confirm) || !confirm) break;
-          }
-
-          const spin = p.spinner();
-          spin.start("Removing license(s)...");
-          const skuIds = choices.map((id) => `'${escapePS(id)}'`).join(",");
-          const { error } = await ps.runCommand(
-            `Set-MgUserLicense -UserId '${escapePS(userId)}' -AddLicenses @() -RemoveLicenses @(${skuIds})`,
-          );
-          if (error) {
-            spin.stop("Failed to remove license(s).");
-            p.log.error(error);
-          } else {
-            const removedNames = choices
-              .map((id) => current!.licenses.find((l) => l.SkuId === id))
-              .filter(Boolean)
-              .map((l) => friendlySkuName(l!.SkuPartNumber));
-            spin.stop(`Removed: ${removedNames.join(", ")}`);
+          if (toRemove.length > 0) {
+            const removedNames = toRemove.map((s) => friendlySkuName(s.SkuPartNumber));
+            parts.push(`Removed: ${removedNames.join(", ")}`);
             licensesRemoved.push(...removedNames);
-            current.licenses = current.licenses.filter((l) => !choices.includes(l.SkuId));
+            const removeIds = new Set(toRemove.map((s) => s.SkuId));
+            current.licenses = current.licenses.filter((l) => !removeIds.has(l.SkuId));
           }
+          spin.stop(parts.join(". ") + ".");
         }
         break;
       }

@@ -1,4 +1,9 @@
 import type { Subprocess } from "bun";
+import {
+  reportPowerShellError,
+  reportPowerShellTimeout,
+  addBreadcrumb,
+} from "./telemetry.ts";
 
 const EXEC_MARKER = "---PROFULGENT-EXEC---";
 const END_MARKER = "---PROFULGENT-END-MARKER---";
@@ -64,7 +69,15 @@ export class PowerShellSession {
     this.process.stdin.write(command + "\n" + EXEC_MARKER + "\n");
     this.process.stdin.flush();
 
-    const output = await this.readUntilMarker(this.process.stdout, END_MARKER, onOutput, timeout);
+    let output: string;
+    try {
+      output = await this.readUntilMarker(this.process.stdout, END_MARKER, onOutput, timeout);
+    } catch (e) {
+      if (e instanceof Error && e.message.includes("timed out")) {
+        reportPowerShellTimeout(command, timeout ?? 120_000);
+      }
+      throw e;
+    }
 
     const hasError = output.includes(ERROR_MARKER);
     const cleanOutput = output
@@ -73,6 +86,7 @@ export class PowerShellSession {
       .trim();
 
     if (hasError) {
+      reportPowerShellError(command, cleanOutput);
       return { output: cleanOutput, error: cleanOutput };
     }
 
@@ -171,6 +185,11 @@ export class PowerShellSession {
     }
 
     this.grantedScopes = allScopes;
+    addBreadcrumb({
+      category: "lifecycle",
+      message: "Graph connected",
+      data: { scopeCount: allScopes.size },
+    });
   }
 
   async connectExchangeOnline(): Promise<void> {
@@ -193,10 +212,12 @@ export class PowerShellSession {
         if (fallback.error) {
           throw new Error(`Failed to connect to Exchange Online: ${fallback.error}`);
         }
+        addBreadcrumb({ category: "lifecycle", message: "Exchange Online connected" });
         return;
       }
       throw new Error(`Failed to connect to Exchange Online: ${error}`);
     }
+    addBreadcrumb({ category: "lifecycle", message: "Exchange Online connected" });
   }
 
   async extractTenantId(): Promise<string | null> {
@@ -242,6 +263,7 @@ export class PowerShellSession {
     await this.connectExchangeOnline();
     await this.extractTenantId();
     await this.getTenantDomain();
+    addBreadcrumb({ category: "lifecycle", message: "Tenant switched" });
   }
 
   async end(): Promise<void> {

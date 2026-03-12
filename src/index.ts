@@ -1,6 +1,20 @@
 import * as p from "@clack/prompts";
+import * as Sentry from "@sentry/bun";
 import { PowerShellSession } from "./powershell.ts";
 import { checkRequirements } from "./requirements.ts";
+import {
+  initTelemetry,
+  trackCommand,
+  setTenantContext,
+  flushTelemetry,
+} from "./telemetry.ts";
+import {
+  initAnalytics,
+  trackAppLaunch,
+  identifyTenant,
+  trackCommandEvent,
+  shutdownAnalytics,
+} from "./analytics.ts";
 import { run as whitelistDomain } from "./commands/whitelist-domain.ts";
 import { run as blockSender } from "./commands/block-sender.ts";
 import { run as quarantineManagement } from "./commands/quarantine-management.ts";
@@ -18,23 +32,40 @@ import { run as licenseReport } from "./commands/license-report.ts";
 import { run as createGroup } from "./commands/create-group.ts";
 import { run as editGroup } from "./commands/edit-group.ts";
 import { run as deleteGroup } from "./commands/delete-group.ts";
+import { run as userInfo } from "./commands/user-info.ts";
 import { run as emergencyResponse } from "./commands/emergency-response.ts";
 import { checkForUpdates } from "./auto-update.ts";
 import pkg from "../package.json";
 
 const ps = new PowerShellSession();
 
+async function runCmd(name: string, fn: () => Promise<void>): Promise<void> {
+  trackCommandEvent(name);
+  try {
+    await trackCommand(name, fn);
+  } catch (e) {
+    p.log.error(`Unexpected error in ${name}: ${e}`);
+  }
+}
+
 async function cleanup() {
   p.log.info("Disconnecting from Exchange Online...");
   await ps.end();
+  await shutdownAnalytics();
+  await flushTelemetry();
   p.outro("Goodbye!");
   process.exit(0);
 }
 
 process.on("SIGINT", () => void cleanup());
 process.on("SIGTERM", () => void cleanup());
+process.on("uncaughtException", (error) => Sentry.captureException(error));
+process.on("unhandledRejection", (reason) => Sentry.captureException(reason));
 
 async function main() {
+  initTelemetry();
+  initAnalytics();
+  trackAppLaunch(pkg.version);
   p.intro(`Microsoft 365 Admin CLI v${pkg.version}`);
 
   await checkRequirements();
@@ -71,6 +102,8 @@ async function main() {
   // Fetch tenant domain
   try {
     const domain = await ps.getTenantDomain();
+    setTenantContext(domain);
+    identifyTenant(domain);
     p.log.success(`Connected to: ${domain}`);
   } catch {
     p.log.warn("Could not determine tenant domain.");
@@ -117,6 +150,7 @@ async function main() {
           { value: "create-user", label: "Create user", hint: "will prompt to login" },
           { value: "edit-user", label: "Edit user", hint: "will prompt to login" },
           { value: "delete-user", label: "Delete user", hint: "will prompt to login" },
+          { value: "user-info", label: "User info", hint: "roles, licenses, mailbox, 2FA" },
           { value: "back", label: "Back" },
         ],
       });
@@ -124,14 +158,17 @@ async function main() {
       if (p.isCancel(action) || action === "back") continue;
 
       switch (action) {
+        case "user-info":
+          await runCmd("user-info", () => userInfo(ps));
+          break;
         case "create-user":
-          await createUser(ps);
+          await runCmd("create-user", () => createUser(ps));
           break;
         case "edit-user":
-          await editUser(ps);
+          await runCmd("edit-user", () => editUser(ps));
           break;
         case "delete-user":
-          await deleteUser(ps);
+          await runCmd("delete-user", () => deleteUser(ps));
           break;
       }
     }
@@ -154,22 +191,22 @@ async function main() {
 
       switch (action) {
         case "inactive-users":
-          await inactiveUsers(ps);
+          await runCmd("inactive-users", () => inactiveUsers(ps));
           break;
         case "shared-mailboxes":
-          await sharedMailboxes(ps);
+          await runCmd("shared-mailboxes", () => sharedMailboxes(ps));
           break;
         case "forwarding-audit":
-          await forwardingAudit(ps);
+          await runCmd("forwarding-audit", () => forwardingAudit(ps));
           break;
         case "admin-roles":
-          await adminRoles(ps);
+          await runCmd("admin-roles", () => adminRoles(ps));
           break;
         case "users-report":
-          await usersReport(ps);
+          await runCmd("users-report", () => usersReport(ps));
           break;
         case "license-report":
-          await licenseReport(ps);
+          await runCmd("license-report", () => licenseReport(ps));
           break;
       }
     }
@@ -189,13 +226,13 @@ async function main() {
 
       switch (action) {
         case "create-group":
-          await createGroup(ps);
+          await runCmd("create-group", () => createGroup(ps));
           break;
         case "edit-group":
-          await editGroup(ps);
+          await runCmd("edit-group", () => editGroup(ps));
           break;
         case "delete-group":
-          await deleteGroup(ps);
+          await runCmd("delete-group", () => deleteGroup(ps));
           break;
       }
     }
@@ -217,25 +254,25 @@ async function main() {
 
       switch (action) {
         case "whitelist-domain":
-          await whitelistDomain(ps);
+          await runCmd("whitelist-domain", () => whitelistDomain(ps));
           break;
         case "block-sender":
-          await blockSender(ps);
+          await runCmd("block-sender", () => blockSender(ps));
           break;
         case "quarantine":
-          await quarantineManagement(ps);
+          await runCmd("quarantine", () => quarantineManagement(ps));
           break;
         case "message-trace":
-          await messageTrace(ps);
+          await runCmd("message-trace", () => messageTrace(ps));
           break;
         case "dkim-audit":
-          await dkimAudit(ps);
+          await runCmd("dkim-audit", () => dkimAudit(ps));
           break;
       }
     }
 
     if (category === "emergency-response") {
-      await emergencyResponse(ps);
+      await runCmd("emergency-response", () => emergencyResponse(ps));
     }
   }
 
@@ -243,7 +280,10 @@ async function main() {
 }
 
 main().catch(async (e) => {
+  Sentry.captureException(e);
   p.log.error(`Unexpected error: ${e}`);
   await ps.end();
+  await shutdownAnalytics();
+  await flushTelemetry();
   process.exit(1);
 });
