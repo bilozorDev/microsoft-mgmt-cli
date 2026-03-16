@@ -286,6 +286,8 @@ async function deleteMessages(ps: PowerShellSession, messages: QuarantineMessage
 }
 
 export async function run(ps: PowerShellSession): Promise<void> {
+  await ps.ensureExchangeConnected();
+
   let cachedMessages: QuarantineMessage[] = [];
 
   while (true) {

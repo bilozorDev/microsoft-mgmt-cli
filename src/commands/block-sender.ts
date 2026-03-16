@@ -213,6 +213,8 @@ async function removeBlocked(ps: PowerShellSession): Promise<void> {
 }
 
 export async function run(ps: PowerShellSession): Promise<void> {
+  await ps.ensureExchangeConnected();
+
   while (true) {
     const action = await p.select({
       message: "Block Sender/Domain",

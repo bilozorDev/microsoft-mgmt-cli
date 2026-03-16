@@ -79,6 +79,8 @@ function getUserLicenses(
 }
 
 export async function run(ps: PowerShellSession): Promise<void> {
+  await ps.ensureExchangeConnected();
+
   // 1. Connect to Graph
   const spin = p.spinner();
   spin.start("Connecting to Microsoft Graph…");

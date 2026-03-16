@@ -7,6 +7,8 @@ function isValidDomain(domain: string): boolean {
 }
 
 export async function run(ps: PowerShellSession): Promise<void> {
+  await ps.ensureExchangeConnected();
+
   const input = await p.text({
     message: "Enter domain(s) to whitelist (comma-separated)",
     placeholder: "example.com, contoso.com",
