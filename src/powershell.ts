@@ -218,6 +218,18 @@ export class PowerShellSession {
     });
   }
 
+  async getGraphAccessToken(): Promise<string> {
+    const { output, error } = await this.runCommand(
+      `(Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/organization?\\$top=1" -Method GET -OutputType HttpResponseMessage).RequestMessage.Headers.Authorization.Parameter`,
+    );
+    if (error || !output.trim()) {
+      throw new Error(
+        "Failed to extract Graph access token from PowerShell session",
+      );
+    }
+    return output.trim();
+  }
+
   async connectExchangeOnline(): Promise<void> {
     let cmd = "Connect-ExchangeOnline -ShowBanner:$false";
 

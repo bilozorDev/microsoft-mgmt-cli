@@ -5,10 +5,24 @@ import type { PowerShellSession } from "../powershell.ts";
 import { friendlySkuName } from "../sku-names.ts";
 import { generateReport } from "../report-template.ts";
 import { appDir } from "../utils.ts";
+import { GraphClient } from "../graph-client.ts";
+
+interface GraphUser {
+  userPrincipalName: string;
+  displayName: string;
+  accountEnabled: boolean;
+  createdDateTime: string | null;
+  userType: string | null;
+  assignedLicenses: Array<{ skuId: string }>;
+  signInActivity?: {
+    lastSuccessfulSignInDateTime: string | null;
+    lastSignInDateTime: string | null;
+  };
+}
 
 interface SubscribedSku {
-  SkuId: string;
-  SkuPartNumber: string;
+  skuId: string;
+  skuPartNumber: string;
 }
 
 interface FlatUser {
@@ -103,35 +117,39 @@ export async function run(ps: PowerShellSession): Promise<void> {
     days = parseInt((custom as string).trim(), 10);
   }
 
-  // 3. Fetch users
+  // 3. Fetch users via Graph REST API
   spin.start("Fetching users with sign-in activity…");
   const stopTimer = elapsedTimer(spin, "Fetching users with sign-in activity");
 
-  const raw = await ps.runCommandJson<FlatUser | FlatUser[]>(
-    [
-      `Get-MgUser -All -Property 'UserPrincipalName','DisplayName','SignInActivity','AccountEnabled','CreatedDateTime','UserType','AssignedLicenses'`,
-      `| ForEach-Object { [PSCustomObject]@{`,
-      `  UserPrincipalName = $_.UserPrincipalName;`,
-      `  DisplayName = $_.DisplayName;`,
-      `  AccountEnabled = $_.AccountEnabled;`,
-      `  CreatedDateTime = $_.CreatedDateTime;`,
-      `  UserType = $_.UserType;`,
-      `  LicenseSkuIds = @($_.AssignedLicenses.SkuId);`,
-      `  LastSuccessfulSignIn = $_.SignInActivity.LastSuccessfulSignInDateTime;`,
-      `  LastSignIn = $_.SignInActivity.LastSignInDateTime`,
-      `} }`,
-    ].join(" "),
-  );
+  const graph = new GraphClient(ps);
+
+  const rawUsers = await graph.getAll<GraphUser>("/users", {
+    params: {
+      $select:
+        "userPrincipalName,displayName,signInActivity,accountEnabled,createdDateTime,userType,assignedLicenses",
+      $top: "999",
+    },
+  });
   stopTimer();
 
-  const allUsers = raw ? (Array.isArray(raw) ? raw : [raw]) : [];
+  // Map nested Graph response to flat shape used by downstream code
+  const allUsers: FlatUser[] = rawUsers.map((u) => ({
+    DisplayName: u.displayName,
+    UserPrincipalName: u.userPrincipalName,
+    AccountEnabled: u.accountEnabled,
+    CreatedDateTime: u.createdDateTime,
+    UserType: u.userType,
+    LicenseSkuIds: u.assignedLicenses?.map((l) => l.skuId) ?? null,
+    LastSuccessfulSignIn:
+      u.signInActivity?.lastSuccessfulSignInDateTime ?? null,
+    LastSignIn: u.signInActivity?.lastSignInDateTime ?? null,
+  }));
 
   // Fetch tenant SKU list to resolve license names
-  const skuRaw = await ps.runCommandJson<SubscribedSku | SubscribedSku[]>(
-    `Get-MgSubscribedSku | Select-Object SkuId, SkuPartNumber`,
-  );
-  const skuList = skuRaw ? (Array.isArray(skuRaw) ? skuRaw : [skuRaw]) : [];
-  const skuMap = new Map(skuList.map((s) => [s.SkuId, s.SkuPartNumber]));
+  const skuList = await graph.getAll<SubscribedSku>("/subscribedSkus", {
+    params: { $select: "skuId,skuPartNumber" },
+  });
+  const skuMap = new Map(skuList.map((s) => [s.skuId, s.skuPartNumber]));
 
   spin.stop(`Fetched ${allUsers.length} user(s).`);
 
