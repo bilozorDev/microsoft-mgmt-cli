@@ -33,7 +33,7 @@ import { run as createGroup } from "./commands/create-group.ts";
 import { run as editGroup } from "./commands/edit-group.ts";
 import { run as deleteGroup } from "./commands/delete-group.ts";
 import { run as userInfo } from "./commands/user-info.ts";
-import { run as emergencyResponse } from "./commands/emergency-response.ts";
+import { run as compromisedAccount } from "./commands/compromised-account.ts";
 import { checkForUpdates } from "./auto-update.ts";
 import pkg from "../package.json";
 
@@ -92,14 +92,6 @@ async function main() {
     p.log.success(`Connected to: ${domain}`);
   };
 
-  // Connect to Exchange Online at startup (triggers tenant resolution callback)
-  try {
-    await ps.ensureExchangeConnected();
-  } catch (e) {
-    p.log.error(`Failed to connect to Exchange Online: ${e}`);
-    p.log.warn("Some commands may not work without an Exchange connection.");
-  }
-
   // Main menu loop
   while (true) {
     const category = await p.select({
@@ -109,7 +101,7 @@ async function main() {
         { value: "group-management", label: "Groups & Shared Mailbox Management" },
         { value: "email-security", label: "Email Security" },
         { value: "reports", label: "Reports" },
-        { value: "emergency-response", label: "Emergency Response", hint: "compromised account" },
+        { value: "compromised-account", label: "Compromised Account" },
         { value: "switch-tenant", label: "Switch tenant", hint: ps.tenantDomain ? `connected to ${ps.tenantDomain}` : "connect to a tenant first", disabled: !ps.isExchangeConnected },
         { value: "exit", label: "Exit" },
       ],
@@ -256,8 +248,8 @@ async function main() {
       }
     }
 
-    if (category === "emergency-response") {
-      await runCmd("emergency-response", () => emergencyResponse(ps));
+    if (category === "compromised-account") {
+      await runCmd("compromised-account", () => compromisedAccount(ps));
     }
   }
 

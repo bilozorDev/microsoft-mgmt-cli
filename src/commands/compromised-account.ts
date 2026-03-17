@@ -1,8 +1,9 @@
-import { resolve, dirname, join } from "path";
-import { mkdirSync, chmodSync } from "fs";
+import { join } from "path";
+import { mkdirSync } from "fs";
 import * as p from "@clack/prompts";
 import type { PowerShellSession } from "../powershell.ts";
 import { generatePassword } from "../password.ts";
+import { generateReport } from "../report-template.ts";
 import { escapePS, createSecretLink, appDir } from "../utils.ts";
 import {
   type AuthMethod,
@@ -58,7 +59,18 @@ interface TraceMessage {
   Size: number;
 }
 
-interface IncidentFindings {
+interface SignInLog {
+  CreatedDateTime: string;
+  AppDisplayName: string;
+  ResourceDisplayName: string;
+  IpAddress: string;
+  Location: { City: string; CountryOrRegion: string } | null;
+  Status: { ErrorCode: number; FailureReason: string } | null;
+  IsInteractive: boolean;
+  ClientAppUsed: string;
+}
+
+interface CompromisedAccountFindings {
   user: { displayName: string; upn: string; id: string };
   timestamp: string;
   passwordReset: boolean;
@@ -74,8 +86,9 @@ interface IncidentFindings {
   rulesRemoved: string[];
   permissions: { user: string; type: string; rights: string }[];
   permissionsChecked: boolean;
-  messageTrace: { recipient: string; subject: string; status: string; received: string }[];
-  messageTraceChecked: boolean;
+  permissionsRemoved: string[];
+  mailFlowReports: { sentByFile: string; sentByCount: number; sentToFile: string; sentToCount: number } | null;
+  signInLogReport: { file: string; count: number } | null;
 }
 
 function truncate(s: string, len: number): string {
@@ -177,7 +190,7 @@ export async function run(ps: PowerShellSession): Promise<void> {
   const graphSpin = p.spinner();
   graphSpin.start("Connecting to Microsoft Graph (check your browser)...");
   try {
-    await ps.ensureGraphConnected(["User.ReadWrite.All", "User-PasswordProfile.ReadWrite.All", "UserAuthenticationMethod.ReadWrite.All"]);
+    await ps.ensureGraphConnected(["User.ReadWrite.All", "User-PasswordProfile.ReadWrite.All", "UserAuthenticationMethod.ReadWrite.All", "AuditLog.Read.All"]);
     graphSpin.stop("Connected to Microsoft Graph.");
   } catch (e) {
     graphSpin.stop("Failed to connect to Microsoft Graph.");
@@ -185,11 +198,13 @@ export async function run(ps: PowerShellSession): Promise<void> {
     return;
   }
 
+  await ps.ensureExchangeConnected();
+
   // Select compromised user
   const user = await selectUser(ps);
   if (!user) return;
 
-  const findings: IncidentFindings = {
+  const findings: CompromisedAccountFindings = {
     user: { displayName: user.DisplayName, upn: user.UserPrincipalName, id: user.Id },
     timestamp: new Date().toISOString(),
     passwordReset: false,
@@ -205,8 +220,9 @@ export async function run(ps: PowerShellSession): Promise<void> {
     rulesRemoved: [],
     permissions: [],
     permissionsChecked: false,
-    messageTrace: [],
-    messageTraceChecked: false,
+    permissionsRemoved: [],
+    mailFlowReports: null,
+    signInLogReport: null,
   };
 
   const upn = user.UserPrincipalName;
@@ -215,7 +231,7 @@ export async function run(ps: PowerShellSession): Promise<void> {
   // Sub-menu loop
   while (true) {
     const action = await p.select({
-      message: `Emergency Response — ${upn}`,
+      message: `Compromised Account — ${upn}`,
       options: [
         { value: "revoke-sessions", label: "Force sign-out", hint: "revoke all sessions" },
         { value: "remove-mfa", label: "Remove all MFA methods" },
@@ -223,7 +239,8 @@ export async function run(ps: PowerShellSession): Promise<void> {
         { value: "check-forwarding", label: "Check & remove forwarding" },
         { value: "check-inbox-rules", label: "Check & remove inbox rules" },
         { value: "audit-permissions", label: "Audit mailbox permissions" },
-        { value: "message-trace", label: "Message trace", hint: "last 10 days" },
+        { value: "mail-flow-report", label: "Mail flow report", hint: "last 10 days, Excel" },
+        { value: "signin-log-report", label: "Sign-in log report", hint: "last 7 days, Excel" },
         { value: "ticket-notes", label: "Generate ticket notes" },
         { value: "back", label: "Back" },
       ],
@@ -699,186 +716,361 @@ export async function run(ps: PowerShellSession): Promise<void> {
           );
         }
         p.note(permLines.join("\n"), "Mailbox Permissions");
+
+        // Offer to remove delegations
+        const permOptions = allPerms.map((perm) => ({
+          value: `${perm.user}::${perm.type}`,
+          label: perm.user,
+          hint: perm.type,
+        }));
+
+        const toRemove = await p.multiselect({
+          message: "Select permissions to remove (space to toggle, enter to confirm)",
+          options: permOptions,
+          required: false,
+        });
+
+        if (p.isCancel(toRemove) || toRemove.length === 0) break;
+
+        const removeSpin = p.spinner();
+        removeSpin.start("Removing selected permissions...");
+        for (const key of toRemove) {
+          const parts = key.split("::");
+          const delegate = parts[0]!;
+          const permType = parts[1]!;
+          const errors: string[] = [];
+
+          if (permType === "FullAccess") {
+            const { error } = await ps.runCommand(
+              `Remove-MailboxPermission -Identity '${escapePS(upn)}' -User '${escapePS(delegate)}' -AccessRights FullAccess -Confirm:$false`,
+            );
+            if (error) errors.push(error);
+          }
+
+          if (permType === "SendAs") {
+            const { error } = await ps.runCommand(
+              `Remove-RecipientPermission -Identity '${escapePS(upn)}' -Trustee '${escapePS(delegate)}' -AccessRights SendAs -Confirm:$false`,
+            );
+            if (error) errors.push(error);
+          }
+
+          if (permType === "SendOnBehalf") {
+            const { error } = await ps.runCommand(
+              `Set-Mailbox -Identity '${escapePS(upn)}' -GrantSendOnBehalfTo @{Remove='${escapePS(delegate)}'}`,
+            );
+            if (error) errors.push(error);
+          }
+
+          if (errors.length === 0) {
+            findings.permissionsRemoved.push(`${delegate} (${permType})`);
+          } else {
+            for (const err of errors) p.log.error(`Failed to remove ${permType} for ${delegate}: ${err}`);
+          }
+        }
+        removeSpin.stop(`Removed ${findings.permissionsRemoved.length} permission(s).`);
         break;
       }
 
-      // ── 7. Message Trace (Last 10 Days) ────────────────────────────
-      case "message-trace": {
+      // ── 7. Mail Flow Report (Last 10 Days, Excel) ─────────────────
+      case "mail-flow-report": {
         const spin = p.spinner();
-        spin.start("Running message trace (last 10 days)...");
+        spin.start("Running mail flow trace (last 10 days)...");
 
         const startDate = dateOffset(10);
         const endDate = new Date().toISOString().slice(0, 19);
-        let cmd = `Get-MessageTraceV2 -SenderAddress '${escapePS(upn)}' -StartDate '${startDate}' -EndDate '${endDate}' | Select-Object MessageId,MessageTraceId,SenderAddress,RecipientAddress,Subject,Status,Received,Size`;
+        const tenant = ps.tenantDomain ?? "unknown";
+        const dateTag = new Date().toISOString().slice(0, 10);
+        const reportsDir = join(appDir(), "reports output");
+        mkdirSync(reportsDir, { recursive: true });
 
-        let raw: TraceMessage | TraceMessage[] | null = null;
+        const traceColumns = [
+          { header: "Sender", width: 32 },
+          { header: "Recipient", width: 32 },
+          { header: "Subject", width: 40, wrapText: true },
+          { header: "Status", width: 14 },
+          { header: "Received", width: 22 },
+          { header: "Size", width: 12 },
+        ];
+
+        // Sent BY user
+        let sentByRaw: TraceMessage | TraceMessage[] | null = null;
         try {
-          raw = await ps.runCommandJson<TraceMessage | TraceMessage[]>(cmd);
+          sentByRaw = await ps.runCommandJson<TraceMessage | TraceMessage[]>(
+            `Get-MessageTraceV2 -SenderAddress '${escapePS(upn)}' -StartDate '${startDate}' -EndDate '${endDate}' | Select-Object SenderAddress,RecipientAddress,Subject,Status,Received,Size`,
+          );
         } catch (e) {
-          spin.stop("Message trace failed.");
+          spin.stop("Mail flow trace failed.");
           p.log.error(`${e instanceof Error ? e.message : e}`);
           break;
         }
+        const sentBy = sentByRaw ? (Array.isArray(sentByRaw) ? sentByRaw : [sentByRaw]) : [];
 
-        const messages = raw ? (Array.isArray(raw) ? raw : [raw]) : [];
-        spin.stop(`Found ${messages.length} message(s) sent in last 10 days.`);
-
-        findings.messageTraceChecked = true;
-        findings.messageTrace = messages.map((m) => ({
-          recipient: m.RecipientAddress ?? "",
-          subject: m.Subject ?? "",
-          status: m.Status ?? "",
-          received: (m.Received ?? "").slice(0, 19),
-        }));
-
-        if (messages.length === 0) {
-          p.log.info("No messages sent by this user in the last 10 days.");
+        // Sent TO user
+        spin.message("Fetching messages sent to user...");
+        let sentToRaw: TraceMessage | TraceMessage[] | null = null;
+        try {
+          sentToRaw = await ps.runCommandJson<TraceMessage | TraceMessage[]>(
+            `Get-MessageTraceV2 -RecipientAddress '${escapePS(upn)}' -StartDate '${startDate}' -EndDate '${endDate}' | Select-Object SenderAddress,RecipientAddress,Subject,Status,Received,Size`,
+          );
+        } catch (e) {
+          spin.stop("Mail flow trace (received) failed.");
+          p.log.error(`${e instanceof Error ? e.message : e}`);
           break;
         }
+        const sentTo = sentToRaw ? (Array.isArray(sentToRaw) ? sentToRaw : [sentToRaw]) : [];
 
-        // Display summary table (max 50 rows)
-        const header = `${"Recipient".padEnd(32)} ${"Subject".padEnd(30)} ${"Status".padEnd(14)} Received`;
-        const separator = "─".repeat(header.length + 5);
-        const displayRows = messages.slice(0, 50);
-        const lines = [header, separator];
-        for (const m of displayRows) {
-          lines.push(
-            `${truncate(m.RecipientAddress ?? "", 31).padEnd(32)} ${truncate(m.Subject ?? "", 29).padEnd(30)} ${(m.Status ?? "").padEnd(14)} ${(m.Received ?? "").slice(0, 19)}`,
-          );
+        spin.message("Generating Excel reports...");
+
+        const toRow = (m: TraceMessage) => [
+          m.SenderAddress ?? "",
+          m.RecipientAddress ?? "",
+          m.Subject ?? "",
+          m.Status ?? "",
+          (m.Received ?? "").slice(0, 19),
+          m.Size ?? 0,
+        ];
+
+        const sentByFile = `${tenant}-compromised-sent-by-${upn}-${dateTag}.xlsx`;
+        const sentByPath = join(reportsDir, sentByFile);
+        const sentByBuffer = await generateReport({
+          sheetName: "Sent By User",
+          title: "Compromised Account — Messages Sent By User",
+          tenant,
+          summary: `${sentBy.length} message(s) sent by ${upn} in the last 10 days`,
+          columns: traceColumns,
+          rows: sentBy.map(toRow),
+        });
+        await Bun.write(sentByPath, sentByBuffer);
+
+        const sentToFile = `${tenant}-compromised-sent-to-${upn}-${dateTag}.xlsx`;
+        const sentToPath = join(reportsDir, sentToFile);
+        const sentToBuffer = await generateReport({
+          sheetName: "Sent To User",
+          title: "Compromised Account — Messages Sent To User",
+          tenant,
+          summary: `${sentTo.length} message(s) sent to ${upn} in the last 10 days`,
+          columns: traceColumns,
+          rows: sentTo.map(toRow),
+        });
+        await Bun.write(sentToPath, sentToBuffer);
+
+        spin.stop(`Mail flow reports saved (${sentBy.length} sent, ${sentTo.length} received).`);
+
+        findings.mailFlowReports = {
+          sentByFile: sentByPath,
+          sentByCount: sentBy.length,
+          sentToFile: sentToPath,
+          sentToCount: sentTo.length,
+        };
+
+        p.log.info(`Sent by user: ${sentByPath}`);
+        p.log.info(`Sent to user: ${sentToPath}`);
+
+        // Open reports folder
+        try {
+          if (process.platform === "win32") {
+            await ps.runCommand(`explorer '${escapePS(reportsDir)}'`);
+          } else {
+            Bun.spawn(["open", reportsDir]);
+          }
+        } catch {
+          // Non-fatal
         }
-        if (messages.length > 50) lines.push(`… and ${messages.length - 50} more`);
-        p.note(lines.join("\n"), `Message Trace (${messages.length} result(s))`);
         break;
       }
 
-      // ── 8. Generate Ticket Notes ───────────────────────────────────
+      // ── 8. Sign-In Log Report (Last 7 Days, Excel) ─────────────────
+      case "signin-log-report": {
+        const spin = p.spinner();
+        spin.start("Fetching sign-in logs (last 7 days)...");
+
+        const sinceDate = new Date();
+        sinceDate.setDate(sinceDate.getDate() - 7);
+        const isoDateZ = sinceDate.toISOString().replace(/\.\d{3}Z$/, "Z");
+
+        let raw: SignInLog | SignInLog[] | null = null;
+        try {
+          raw = await ps.runCommandJson<SignInLog | SignInLog[]>(
+            `Get-MgAuditLogSignIn -Filter "userId eq '${escapePS(userId)}' and createdDateTime ge ${isoDateZ}" -All | Select-Object CreatedDateTime,AppDisplayName,ResourceDisplayName,IpAddress,Location,Status,IsInteractive,ClientAppUsed`,
+          );
+        } catch (e) {
+          spin.stop("Sign-in log query failed.");
+          const msg = e instanceof Error ? e.message : String(e);
+          if (/license|Premium|P1|P2/i.test(msg)) {
+            p.log.error("Sign-in logs require Entra ID P1 or P2 license.");
+          } else {
+            p.log.error(msg);
+          }
+          break;
+        }
+
+        const logs = raw ? (Array.isArray(raw) ? raw : [raw]) : [];
+        spin.message("Generating Excel report...");
+
+        const tenant = ps.tenantDomain ?? "unknown";
+        const dateTag = new Date().toISOString().slice(0, 10);
+        const reportsDir = join(appDir(), "reports output");
+        mkdirSync(reportsDir, { recursive: true });
+
+        const signInFile = `${tenant}-compromised-signin-log-${upn}-${dateTag}.xlsx`;
+        const signInPath = join(reportsDir, signInFile);
+
+        const signInBuffer = await generateReport({
+          sheetName: "Sign-In Logs",
+          title: "Compromised Account — Sign-In Logs",
+          tenant,
+          summary: `${logs.length} sign-in(s) for ${upn} in the last 7 days`,
+          columns: [
+            { header: "Date", width: 22 },
+            { header: "App", width: 28 },
+            { header: "Resource", width: 28 },
+            { header: "IP Address", width: 18 },
+            { header: "City", width: 18 },
+            { header: "Country", width: 16 },
+            { header: "Status Code", width: 14 },
+            { header: "Failure Reason", width: 30, wrapText: true },
+            { header: "Interactive", width: 12 },
+            { header: "Client App", width: 22 },
+          ],
+          rows: logs.map((l) => [
+            (l.CreatedDateTime ?? "").slice(0, 19),
+            l.AppDisplayName ?? "",
+            l.ResourceDisplayName ?? "",
+            l.IpAddress ?? "",
+            l.Location?.City ?? "",
+            l.Location?.CountryOrRegion ?? "",
+            l.Status?.ErrorCode ?? "",
+            l.Status?.FailureReason ?? "",
+            l.IsInteractive ? "Yes" : "No",
+            l.ClientAppUsed ?? "",
+          ]),
+        });
+        await Bun.write(signInPath, signInBuffer);
+
+        spin.stop(`Sign-in log report saved (${logs.length} entries).`);
+
+        findings.signInLogReport = { file: signInPath, count: logs.length };
+
+        p.log.info(`Sign-in log: ${signInPath}`);
+
+        // Open reports folder
+        try {
+          if (process.platform === "win32") {
+            await ps.runCommand(`explorer '${escapePS(reportsDir)}'`);
+          } else {
+            Bun.spawn(["open", reportsDir]);
+          }
+        } catch {
+          // Non-fatal
+        }
+        break;
+      }
+
+      // ── 9. Generate Ticket Notes ───────────────────────────────────
       case "ticket-notes": {
         const now = new Date();
-        const dateStr = now.toISOString().slice(0, 16).replace("T", " ") + " UTC";
+        const dateStr = now.toLocaleDateString("en-US", {
+          year: "numeric",
+          month: "long",
+          day: "numeric",
+          hour: "numeric",
+          minute: "2-digit",
+          timeZoneName: "short",
+        });
 
         const lines: string[] = [
-          "=== INCIDENT RESPONSE REPORT ===",
+          `Compromised account response for ${findings.user.displayName} (${findings.user.upn})`,
           `Date: ${dateStr}`,
-          `Tenant: ${ps.tenantDomain ?? "Unknown"}`,
-          `Affected User: ${findings.user.displayName} (${findings.user.upn})`,
-          "",
-          "--- ACTIONS TAKEN ---",
         ];
 
         // Sessions
         if (findings.sessionsRevoked) {
-          lines.push("[x] Signed out of all sessions");
-        } else {
-          lines.push("[ ] Sign out of all sessions: Not done");
+          lines.push("");
+          lines.push("Revoked all active sessions — user is signed out everywhere.");
         }
 
         // MFA
         if (findings.mfaMethodsRemoved.length > 0) {
-          lines.push(`[x] MFA methods removed: ${findings.mfaMethodsRemoved.join(", ")}`);
-          if (findings.mfaMethodsBefore.length > 0) {
-            lines.push("    Previous MFA methods:");
-            for (const m of findings.mfaMethodsBefore) {
-              lines.push(`      - ${m.name}${m.detail ? `: ${m.detail}` : ""}`);
-            }
-          }
-        } else if (findings.mfaMethodsBefore.length > 0) {
-          lines.push(`[ ] MFA methods: ${findings.mfaMethodsBefore.length} found, none removed`);
-          for (const m of findings.mfaMethodsBefore) {
-            lines.push(`      - ${m.name}${m.detail ? `: ${m.detail}` : ""}`);
-          }
-        } else {
-          lines.push("[ ] MFA methods: Not checked");
+          lines.push("");
+          const methodDescriptions = findings.mfaMethodsBefore
+            .filter((m) => findings.mfaMethodsRemoved.includes(m.name))
+            .map((m) => m.detail ? `${m.name} (${m.detail})` : m.name);
+          lines.push(`Removed MFA methods: ${methodDescriptions.join(", ")}.`);
         }
 
         // Password
         if (findings.passwordReset) {
-          lines.push("[x] Password reset (force change at next sign-in)");
-          lines.push("    New credentials shared via one-time link");
-        } else {
-          lines.push("[ ] Password reset: Not done");
+          lines.push("");
+          lines.push("Reset password with force-change at next sign-in. New credentials shared via one-time secret link.");
         }
 
         // Forwarding
         if (findings.forwardingChecked) {
+          lines.push("");
           if (findings.forwardingFound && (findings.forwardingFound.smtp || findings.forwardingFound.address)) {
             const target = findings.forwardingFound.smtp ?? findings.forwardingFound.address ?? "";
             if (findings.forwardingRemoved) {
-              lines.push(`[x] Forwarding: ${target} (REMOVED)`);
+              lines.push(`Checked mailbox forwarding — found forwarding to ${target}. Removed.`);
             } else {
-              lines.push(`[!] Forwarding: ${target} (NOT REMOVED)`);
+              lines.push(`Checked mailbox forwarding — found forwarding to ${target}. Not removed.`);
             }
           } else {
-            lines.push("[x] Forwarding: None configured");
+            lines.push("Checked mailbox forwarding — no forwarding configured.");
           }
-        } else {
-          lines.push("[ ] Forwarding: Not checked");
         }
 
         // Inbox rules
         if (findings.inboxRulesChecked) {
+          lines.push("");
           if (findings.inboxRules.length === 0) {
-            lines.push("[x] Inbox rules: None found");
+            lines.push("Checked inbox rules — none found.");
           } else {
             const removedSet = new Set(findings.rulesRemoved);
-            if (findings.rulesRemoved.length > 0) {
-              lines.push(`[x] Inbox rules: ${findings.inboxRules.length} found, ${findings.rulesRemoved.length} removed`);
-            } else {
-              lines.push(`[x] Inbox rules: ${findings.inboxRules.length} found, none removed`);
-            }
+            lines.push(`Checked inbox rules — found ${findings.inboxRules.length} rule(s):`);
             for (const r of findings.inboxRules) {
               const wasRemoved = removedSet.has(r.name);
-              const status = wasRemoved ? "REMOVED" : r.enabled ? "active" : "disabled";
-              lines.push(`      - "${r.name}" (${status})`);
               const actions: string[] = [];
-              if (r.forwardTo) actions.push(`Forward to: ${r.forwardTo}`);
-              if (r.redirectTo) actions.push(`Redirect to: ${r.redirectTo}`);
-              if (r.deleteMessage) actions.push("Delete message");
-              if (r.moveToFolder) actions.push(`Move to: ${r.moveToFolder}`);
-              if (actions.length > 0) lines.push(`        Actions: ${actions.join(", ")}`);
+              if (r.forwardTo) actions.push(`forwards to ${r.forwardTo}`);
+              if (r.redirectTo) actions.push(`redirects to ${r.redirectTo}`);
+              if (r.deleteMessage) actions.push("deletes messages");
+              if (r.moveToFolder) actions.push(`moves to ${r.moveToFolder} folder`);
+              const actionStr = actions.length > 0 ? ` — ${actions.join(", ")}` : "";
+              const status = wasRemoved ? " — removed" : " — left in place";
+              lines.push(`- "${r.name}"${actionStr}${status}`);
             }
           }
-        } else {
-          lines.push("[ ] Inbox rules: Not checked");
         }
 
         // Permissions
         if (findings.permissionsChecked) {
+          lines.push("");
           if (findings.permissions.length === 0) {
-            lines.push("[x] Mailbox permissions: No non-inherited permissions");
+            lines.push("Checked mailbox delegation — no non-inherited permissions found.");
           } else {
-            lines.push(`[x] Mailbox permissions: ${findings.permissions.length} found`);
+            const removedSet = new Set(findings.permissionsRemoved);
+            lines.push(`Checked mailbox delegation — found ${findings.permissions.length} permission(s):`);
             for (const perm of findings.permissions) {
-              lines.push(`    ${perm.user} — ${perm.type}`);
+              const key = `${perm.user} (${perm.type})`;
+              const status = removedSet.has(key) ? " — removed" : " — left in place";
+              lines.push(`- ${perm.user} (${perm.type})${status}`);
             }
           }
-        } else {
-          lines.push("[ ] Mailbox permissions: Not checked");
         }
 
-        // Message trace
-        if (findings.messageTraceChecked) {
-          lines.push(`[x] Message trace (last 10 days): ${findings.messageTrace.length} messages sent`);
-          if (findings.messageTrace.length > 0) {
-            // Top recipients
-            const recipientCounts = new Map<string, number>();
-            for (const m of findings.messageTrace) {
-              recipientCounts.set(m.recipient, (recipientCounts.get(m.recipient) ?? 0) + 1);
-            }
-            const topRecipients = [...recipientCounts.entries()]
-              .sort((a, b) => b[1] - a[1])
-              .slice(0, 5)
-              .map(([addr, count]) => `${addr} (${count})`)
-              .join(", ");
-            lines.push(`    Top recipients: ${topRecipients}`);
-          }
-        } else {
-          lines.push("[ ] Message trace: Not checked");
+        // Mail flow reports
+        if (findings.mailFlowReports) {
+          lines.push("");
+          lines.push("Generated mail flow reports (last 10 days) for review — check if any emails weren't sent by the user or were deleted by an auto-rule.");
         }
 
-        lines.push("================================");
+        // Sign-in log report
+        if (findings.signInLogReport) {
+          lines.push("");
+          lines.push("Generated sign-in log report (last 7 days) for review — check for unfamiliar IPs, locations, or apps.");
+        }
 
         const report = lines.join("\n");
-        p.note(report, "Incident Response Report");
+        p.note(report, "Compromised Account Report");
 
         const copied = await copyToClipboard(ps, report);
         if (copied) {
