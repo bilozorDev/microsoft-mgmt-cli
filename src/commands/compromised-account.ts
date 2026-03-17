@@ -88,6 +88,7 @@ interface CompromisedAccountFindings {
   permissions: { user: string; type: string; rights: string }[];
   permissionsChecked: boolean;
   permissionsRemoved: string[];
+  adminRoles: string[];
   mailFlowReports: { sentByFile: string; sentByCount: number; sentToFile: string; sentToCount: number } | null;
   signInLogReport: { file: string; count: number } | null;
 }
@@ -191,7 +192,7 @@ export async function run(ps: PowerShellSession): Promise<void> {
   const graphSpin = p.spinner();
   graphSpin.start("Connecting to Microsoft Graph (check your browser)...");
   try {
-    await ps.ensureGraphConnected(["User.ReadWrite.All", "User-PasswordProfile.ReadWrite.All", "UserAuthenticationMethod.ReadWrite.All", "AuditLog.Read.All"]);
+    await ps.ensureGraphConnected(["User.ReadWrite.All", "User-PasswordProfile.ReadWrite.All", "UserAuthenticationMethod.ReadWrite.All", "AuditLog.Read.All", "RoleManagement.Read.Directory"]);
     graphSpin.stop("Connected to Microsoft Graph.");
   } catch (e) {
     graphSpin.stop("Failed to connect to Microsoft Graph.");
@@ -223,12 +224,27 @@ export async function run(ps: PowerShellSession): Promise<void> {
     permissions: [],
     permissionsChecked: false,
     permissionsRemoved: [],
+    adminRoles: [],
     mailFlowReports: null,
     signInLogReport: null,
   };
 
   const upn = user.UserPrincipalName;
   const userId = user.Id;
+
+  // Check admin roles
+  try {
+    const rolesRaw = await ps.runCommandJson<{ DisplayName: string } | { DisplayName: string }[]>(
+      `Get-MgUserMemberOf -UserId '${escapePS(userId)}' -All | Where-Object { $_.AdditionalProperties['@odata.type'] -eq '#microsoft.graph.directoryRole' } | ForEach-Object { [PSCustomObject]@{ DisplayName = $_.AdditionalProperties['displayName'] } }`,
+    );
+    const roles = rolesRaw ? (Array.isArray(rolesRaw) ? rolesRaw : [rolesRaw]) : [];
+    findings.adminRoles = roles.map((r) => r.DisplayName);
+    if (findings.adminRoles.length > 0) {
+      p.log.warn(`This user has ${findings.adminRoles.length} admin role(s): ${findings.adminRoles.join(", ")}`);
+    }
+  } catch {
+    // Non-fatal — continue with the workflow
+  }
 
   // Sub-menu loop
   while (true) {
@@ -983,6 +999,12 @@ export async function run(ps: PowerShellSession): Promise<void> {
           `Compromised account response for ${findings.user.displayName} (${findings.user.upn})`,
           `Date: ${dateStr}`,
         ];
+
+        // Admin roles
+        if (findings.adminRoles.length > 0) {
+          lines.push("");
+          lines.push(`This user has admin roles: ${findings.adminRoles.join(", ")}. Will review tenant-wide changes based on what this account had access to.`);
+        }
 
         // Sessions
         if (findings.sessionsRevoked) {
