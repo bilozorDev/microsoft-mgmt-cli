@@ -554,6 +554,9 @@ export async function run(ps: PowerShellSession): Promise<void> {
         const spin = p.spinner();
         spin.start("Updating roles…");
 
+        const runRolesAdded: string[] = [];
+        const runRolesRemoved: string[] = [];
+
         // Add roles
         for (const r of toAdd) {
           spin.message(`Adding ${r.DisplayName}…`);
@@ -563,6 +566,7 @@ export async function run(ps: PowerShellSession): Promise<void> {
           if (error) {
             p.log.error(`Failed to add ${r.DisplayName}: ${error}`);
           } else {
+            runRolesAdded.push(r.DisplayName);
             rolesAdded.push(r.DisplayName);
           }
         }
@@ -578,13 +582,14 @@ export async function run(ps: PowerShellSession): Promise<void> {
           if (error) {
             p.log.error(`Failed to remove ${r.DisplayName}: ${error}`);
           } else {
+            runRolesRemoved.push(r.DisplayName);
             rolesRemoved.push(r.DisplayName);
           }
         }
 
         const parts: string[] = [];
-        if (rolesAdded.length > 0) parts.push(`Added: ${rolesAdded.join(", ")}`);
-        if (rolesRemoved.length > 0) parts.push(`Removed: ${rolesRemoved.join(", ")}`);
+        if (runRolesAdded.length > 0) parts.push(`Added: ${runRolesAdded.join(", ")}`);
+        if (runRolesRemoved.length > 0) parts.push(`Removed: ${runRolesRemoved.join(", ")}`);
         spin.stop(parts.length > 0 ? parts.join(". ") + "." : "No changes applied.");
         break;
       }
@@ -668,6 +673,7 @@ export async function run(ps: PowerShellSession): Promise<void> {
         const removeSpin = p.spinner();
         removeSpin.start("Removing selected MFA methods...");
 
+        const runMfaRemoved: string[] = [];
         for (const methodId of choices) {
           const detail = methodDetails.find((d) => d.method.Id === methodId)!;
           const key = mfaTypeKey(detail.method.ODataType!);
@@ -680,13 +686,14 @@ export async function run(ps: PowerShellSession): Promise<void> {
           if (error) {
             p.log.error(`Failed to remove ${detail.friendly}: ${error}`);
           } else {
+            runMfaRemoved.push(detail.friendly);
             mfaMethodsRemoved.push(detail.friendly);
           }
         }
 
         removeSpin.stop(
-          mfaMethodsRemoved.length > 0
-            ? `Removed ${mfaMethodsRemoved.length} MFA method(s).`
+          runMfaRemoved.length > 0
+            ? `Removed ${runMfaRemoved.length} MFA method(s).`
             : "No methods removed.",
         );
         break;
@@ -825,6 +832,7 @@ export async function run(ps: PowerShellSession): Promise<void> {
           const removeSpin = p.spinner();
           removeSpin.start("Removing delegations...");
 
+          const runDelegRemoved: string[] = [];
           for (const entry of toRemove) {
             const [type, ...userParts] = entry.split(":");
             const delegateUser = userParts.join(":");
@@ -847,13 +855,14 @@ export async function run(ps: PowerShellSession): Promise<void> {
             if (error) {
               p.log.error(`Failed to remove ${type} for ${delegateUser}: ${error}`);
             } else {
+              runDelegRemoved.push(`${type} ← ${delegateUser}`);
               delegationsRemoved.push(`${type} ← ${delegateUser}`);
             }
           }
 
           removeSpin.stop(
-            delegationsRemoved.length > 0
-              ? `Removed ${delegationsRemoved.length} delegation(s).`
+            runDelegRemoved.length > 0
+              ? `Removed ${runDelegRemoved.length} delegation(s).`
               : "No delegations removed.",
           );
         }

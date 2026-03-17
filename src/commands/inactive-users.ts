@@ -154,10 +154,18 @@ export async function run(ps: PowerShellSession): Promise<void> {
   }));
 
   // Fetch tenant SKU list to resolve license names
-  const skuList = await graph.getAll<SubscribedSku>("/subscribedSkus", {
-    params: { $select: "skuId,skuPartNumber" },
-  });
-  const skuMap = new Map(skuList.map((s) => [s.skuId, s.skuPartNumber]));
+  spin.message("Fetching license information…");
+  let skuMap: Map<string, string>;
+  try {
+    const skuList = await graph.getAll<SubscribedSku>("/subscribedSkus", {
+      params: { $select: "skuId,skuPartNumber" },
+    });
+    skuMap = new Map(skuList.map((s) => [s.skuId, s.skuPartNumber]));
+  } catch (e: any) {
+    spin.stop("Failed to fetch license information.");
+    p.log.error(e.message ?? String(e));
+    return;
+  }
 
   spin.stop(`Fetched ${allUsers.length} user(s).`);
 
