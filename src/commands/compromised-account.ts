@@ -75,6 +75,7 @@ interface CompromisedAccountFindings {
   timestamp: string;
   passwordReset: boolean;
   newPassword: string | null;
+  passwordDelivery: "secret_link" | "raw" | null;
   sessionsRevoked: boolean;
   mfaMethodsBefore: { name: string; detail: string }[];
   mfaMethodsRemoved: string[];
@@ -209,6 +210,7 @@ export async function run(ps: PowerShellSession): Promise<void> {
     timestamp: new Date().toISOString(),
     passwordReset: false,
     newPassword: null,
+    passwordDelivery: null,
     sessionsRevoked: false,
     mfaMethodsBefore: [] as { name: string; detail: string }[],
     mfaMethodsRemoved: [],
@@ -494,11 +496,13 @@ export async function run(ps: PowerShellSession): Promise<void> {
         if ("url" in otsResult) {
           otsSpin.stop("One-time secret link created.");
           p.log.info(`Secret link: ${otsResult.url}`);
+          findings.passwordDelivery = "secret_link";
           const copied = await copyToClipboard(ps, otsResult.url);
           if (copied) p.log.success("Link copied to clipboard.");
         } else {
           otsSpin.stop("Failed to create one-time secret link.");
           p.log.error("error" in otsResult ? otsResult.error : "Unknown error");
+          findings.passwordDelivery = "raw";
           // Fallback: copy password directly
           const copied = await copyToClipboard(ps, password);
           if (copied) p.log.success("Password copied to clipboard.");
@@ -734,40 +738,37 @@ export async function run(ps: PowerShellSession): Promise<void> {
 
         const removeSpin = p.spinner();
         removeSpin.start("Removing selected permissions...");
+        const failures: string[] = [];
         for (const key of toRemove) {
           const parts = key.split("::");
           const delegate = parts[0]!;
           const permType = parts[1]!;
-          const errors: string[] = [];
 
           if (permType === "FullAccess") {
             const { error } = await ps.runCommand(
               `Remove-MailboxPermission -Identity '${escapePS(upn)}' -User '${escapePS(delegate)}' -AccessRights FullAccess -Confirm:$false`,
             );
-            if (error) errors.push(error);
+            if (error) { failures.push(`Failed to remove FullAccess for ${delegate}: ${error}`); continue; }
           }
 
           if (permType === "SendAs") {
             const { error } = await ps.runCommand(
               `Remove-RecipientPermission -Identity '${escapePS(upn)}' -Trustee '${escapePS(delegate)}' -AccessRights SendAs -Confirm:$false`,
             );
-            if (error) errors.push(error);
+            if (error) { failures.push(`Failed to remove SendAs for ${delegate}: ${error}`); continue; }
           }
 
           if (permType === "SendOnBehalf") {
             const { error } = await ps.runCommand(
               `Set-Mailbox -Identity '${escapePS(upn)}' -GrantSendOnBehalfTo @{Remove='${escapePS(delegate)}'}`,
             );
-            if (error) errors.push(error);
+            if (error) { failures.push(`Failed to remove SendOnBehalf for ${delegate}: ${error}`); continue; }
           }
 
-          if (errors.length === 0) {
-            findings.permissionsRemoved.push(`${delegate} (${permType})`);
-          } else {
-            for (const err of errors) p.log.error(`Failed to remove ${permType} for ${delegate}: ${err}`);
-          }
+          findings.permissionsRemoved.push(`${delegate} (${permType})`);
         }
         removeSpin.stop(`Removed ${findings.permissionsRemoved.length} permission(s).`);
+        for (const f of failures) p.log.error(f);
         break;
       }
 
@@ -779,7 +780,7 @@ export async function run(ps: PowerShellSession): Promise<void> {
         const startDate = dateOffset(10);
         const endDate = new Date().toISOString().slice(0, 19);
         const tenant = ps.tenantDomain ?? "unknown";
-        const dateTag = new Date().toISOString().slice(0, 10);
+        const dateTag = new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-");
         const reportsDir = join(appDir(), "reports output");
         mkdirSync(reportsDir, { recursive: true });
 
@@ -908,7 +909,7 @@ export async function run(ps: PowerShellSession): Promise<void> {
         spin.message("Generating Excel report...");
 
         const tenant = ps.tenantDomain ?? "unknown";
-        const dateTag = new Date().toISOString().slice(0, 10);
+        const dateTag = new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-");
         const reportsDir = join(appDir(), "reports output");
         mkdirSync(reportsDir, { recursive: true });
 
@@ -1001,7 +1002,11 @@ export async function run(ps: PowerShellSession): Promise<void> {
         // Password
         if (findings.passwordReset) {
           lines.push("");
-          lines.push("Reset password with force-change at next sign-in. New credentials shared via one-time secret link.");
+          if (findings.passwordDelivery === "secret_link") {
+            lines.push("Reset password with force-change at next sign-in. New credentials shared via one-time secret link.");
+          } else {
+            lines.push("Reset password with force-change at next sign-in. New credentials copied to clipboard (one-time link unavailable).");
+          }
         }
 
         // Forwarding
