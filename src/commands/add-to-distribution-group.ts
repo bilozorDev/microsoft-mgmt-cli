@@ -8,6 +8,8 @@ interface DistributionGroup {
 }
 
 export async function run(ps: PowerShellSession, upn: string): Promise<{ name: string; email: string }[]> {
+  await ps.ensureExchangeConnected();
+
   const spin = p.spinner();
   spin.start("Fetching distribution groups...");
 

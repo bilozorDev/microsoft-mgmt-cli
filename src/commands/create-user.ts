@@ -26,7 +26,7 @@ function suggestUsername(displayName: string): string {
 }
 
 export async function run(ps: PowerShellSession): Promise<void> {
-  // 1. Ensure Graph connected
+  // 1. Ensure Graph + Exchange connected
   const graphSpin = p.spinner();
   graphSpin.start("Connecting to Microsoft Graph (check your browser)...");
   try {
@@ -34,6 +34,17 @@ export async function run(ps: PowerShellSession): Promise<void> {
     graphSpin.stop("Connected to Microsoft Graph.");
   } catch (e) {
     graphSpin.stop("Failed to connect to Microsoft Graph.");
+    p.log.error(`${e}`);
+    return;
+  }
+
+  const exoSpin = p.spinner();
+  exoSpin.start("Connecting to Exchange Online (check your browser)...");
+  try {
+    await ps.ensureExchangeConnected();
+    exoSpin.stop("Connected to Exchange Online.");
+  } catch (e) {
+    exoSpin.stop("Failed to connect to Exchange Online.");
     p.log.error(`${e}`);
     return;
   }
