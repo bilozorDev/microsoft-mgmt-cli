@@ -177,7 +177,7 @@ export async function run(ps: PowerShellSession): Promise<void> {
   const graphSpin = p.spinner();
   graphSpin.start("Connecting to Microsoft Graph (check your browser)...");
   try {
-    await ps.ensureGraphConnected(["User.ReadWrite.All", "UserAuthenticationMethod.ReadWrite.All"]);
+    await ps.ensureGraphConnected(["User.ReadWrite.All", "User-PasswordProfile.ReadWrite.All", "UserAuthenticationMethod.ReadWrite.All"]);
     graphSpin.stop("Connected to Microsoft Graph.");
   } catch (e) {
     graphSpin.stop("Failed to connect to Microsoft Graph.");
@@ -319,6 +319,8 @@ export async function run(ps: PowerShellSession): Promise<void> {
         const removed: string[] = [];
         const failed: string[] = [];
 
+        // Step 1: First pass — attempt all removals
+        let retryMethods: typeof removable = [];
         for (const method of removable) {
           const key = mfaTypeKey(method.ODataType!);
           const info = MFA_REMOVE_CMDLETS[key]!;
@@ -329,10 +331,110 @@ export async function run(ps: PowerShellSession): Promise<void> {
             `${info.cmdlet} -UserId '${escapePS(userId)}' ${info.param} '${escapePS(method.Id)}'`,
           );
           if (error) {
-            failed.push(`${friendly}: ${error}`);
+            retryMethods.push(method);
           } else {
             removed.push(friendly);
           }
+        }
+
+        // Step 2: Simple retry — default may have auto-shifted after step 1
+        if (retryMethods.length > 0) {
+          const stillFailing: typeof removable = [];
+          for (const method of retryMethods) {
+            const key = mfaTypeKey(method.ODataType!);
+            const info = MFA_REMOVE_CMDLETS[key]!;
+            const friendly = friendlyMfaMethod(method.ODataType!) ?? key;
+
+            removeSpin.message(`Retrying ${friendly}...`);
+            const { error } = await ps.runCommand(
+              `${info.cmdlet} -UserId '${escapePS(userId)}' ${info.param} '${escapePS(method.Id)}'`,
+            );
+            if (error) {
+              stillFailing.push(method);
+            } else {
+              removed.push(friendly);
+            }
+          }
+          retryMethods = stillFailing;
+        }
+
+        // Step 3: Beta API fallback — change default method, then retry
+        if (retryMethods.length > 0) {
+          // Determine which method types we're NOT deleting to use as new default
+          const deletingKeys = new Set(retryMethods.map((m) => mfaTypeKey(m.ODataType!)));
+          const preferenceOptions: { pref: string; key: string }[] = [
+            { pref: "push", key: "microsoftAuthenticatorAuthenticationMethod" },
+            { pref: "oath", key: "softwareOathAuthenticationMethod" },
+            { pref: "sms", key: "phoneAuthenticationMethod" },
+            { pref: "voiceMobile", key: "phoneAuthenticationMethod" },
+            { pref: "voiceAlternateMobile", key: "phoneAuthenticationMethod" },
+            { pref: "voiceOffice", key: "phoneAuthenticationMethod" },
+          ];
+
+          // Try each preference that doesn't correspond to a method being deleted
+          let defaultChanged = false;
+          let newDefaultKey: string | null = null;
+          for (const opt of preferenceOptions) {
+            if (deletingKeys.has(opt.key)) continue;
+
+            removeSpin.message("Changing default MFA method via beta API...");
+            const { error } = await ps.runCommand(
+              `Invoke-MgGraphRequest -Uri 'https://graph.microsoft.com/beta/users/${escapePS(userId)}/authentication/signInPreferences' -Method PATCH -Body '{"userPreferredMethodForSecondaryAuthentication":"${opt.pref}"}' -ContentType 'application/json'`,
+            );
+            if (!error) {
+              defaultChanged = true;
+              newDefaultKey = opt.key;
+              break;
+            }
+          }
+
+          // If we're deleting all method types, try each preference anyway
+          if (!defaultChanged) {
+            for (const opt of preferenceOptions) {
+              removeSpin.message("Changing default MFA method via beta API...");
+              const { error } = await ps.runCommand(
+                `Invoke-MgGraphRequest -Uri 'https://graph.microsoft.com/beta/users/${escapePS(userId)}/authentication/signInPreferences' -Method PATCH -Body '{"userPreferredMethodForSecondaryAuthentication":"${opt.pref}"}' -ContentType 'application/json'`,
+              );
+              if (!error) {
+                defaultChanged = true;
+                newDefaultKey = opt.key;
+                break;
+              }
+            }
+          }
+
+          // Retry failed methods after changing default
+          // Delete non-default methods first, then the new default last
+          if (defaultChanged) {
+            const nonDefault = retryMethods.filter((m) => mfaTypeKey(m.ODataType!) !== newDefaultKey);
+            const isDefault = retryMethods.filter((m) => mfaTypeKey(m.ODataType!) === newDefaultKey);
+            const ordered = [...nonDefault, ...isDefault];
+
+            const finalFailing: typeof removable = [];
+            for (const method of ordered) {
+              const key = mfaTypeKey(method.ODataType!);
+              const info = MFA_REMOVE_CMDLETS[key]!;
+              const friendly = friendlyMfaMethod(method.ODataType!) ?? key;
+
+              removeSpin.message(`Retrying ${friendly}...`);
+              const { error } = await ps.runCommand(
+                `${info.cmdlet} -UserId '${escapePS(userId)}' ${info.param} '${escapePS(method.Id)}'`,
+              );
+              if (error) {
+                finalFailing.push(method);
+              } else {
+                removed.push(friendly);
+              }
+            }
+            retryMethods = finalFailing;
+          }
+        }
+
+        // Build final failed list from any remaining methods
+        for (const method of retryMethods) {
+          const key = mfaTypeKey(method.ODataType!);
+          const friendly = friendlyMfaMethod(method.ODataType!) ?? key;
+          failed.push(`${friendly}: could not remove (may be default method)`);
         }
 
         findings.mfaMethodsRemoved = removed;
