@@ -366,7 +366,9 @@ export async function run(ps: PowerShellSession): Promise<void> {
             { pref: "push", key: "microsoftAuthenticatorAuthenticationMethod" },
             { pref: "oath", key: "softwareOathAuthenticationMethod" },
             { pref: "sms", key: "phoneAuthenticationMethod" },
-            { pref: "email", key: "emailAuthenticationMethod" },
+            { pref: "voiceMobile", key: "phoneAuthenticationMethod" },
+            { pref: "voiceAlternateMobile", key: "phoneAuthenticationMethod" },
+            { pref: "voiceOffice", key: "phoneAuthenticationMethod" },
           ];
 
           // Try each preference that doesn't correspond to a method being deleted
