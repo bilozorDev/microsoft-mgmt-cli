@@ -233,12 +233,16 @@ export class PowerShellSession {
   }
 
   async getGraphAccessToken(): Promise<string> {
+    // Microsoft.Graph SDK v2 does not expose AccessToken on Get-MgContext.
+    // The documented workaround is to issue a lightweight Graph request with
+    // -OutputType HttpResponseMessage and read the bearer token the SDK
+    // attached to the outgoing Authorization header.
     const { output, error } = await this.runCommand(
-      `(Get-MgContext).AccessToken`,
+      `(Invoke-MgGraphRequest -Uri 'https://graph.microsoft.com/v1.0/organization?$select=id' -Method GET -OutputType HttpResponseMessage).RequestMessage.Headers.Authorization.Parameter`,
     );
     if (error || !output.trim()) {
       throw new Error(
-        "Failed to retrieve Graph access token from PowerShell session",
+        "Failed to extract Graph access token from PowerShell session",
       );
     }
     return output.trim();
