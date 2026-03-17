@@ -5,25 +5,24 @@ import type { PowerShellSession } from "../powershell.ts";
 import { friendlySkuName } from "../sku-names.ts";
 import { generateReport } from "../report-template.ts";
 import { appDir } from "../utils.ts";
+import { GraphClient } from "../graph-client.ts";
 
 interface SubscribedSku {
-  SkuId: string;
-  SkuPartNumber: string;
-  ConsumedUnits: number;
-  Enabled: number;
-  Warning: number;
-  Suspended: number;
+  skuId: string;
+  skuPartNumber: string;
+  consumedUnits: number;
+  prepaidUnits: { enabled: number; warning: number; suspended: number };
 }
 
 interface Subscription {
-  Id: string;
-  SkuId: string;
-  SkuPartNumber: string;
-  TotalLicenses: number;
-  Status: string;
-  IsTrial: boolean;
-  CreatedDateTime: string | null;
-  NextLifecycleDateTime: string | null;
+  id: string;
+  skuId: string;
+  skuPartNumber: string;
+  totalLicenses: number;
+  status: string;
+  isTrial: boolean;
+  createdDateTime: string | null;
+  nextLifecycleDateTime: string | null;
 }
 
 function elapsedTimer(
@@ -73,30 +72,37 @@ export async function run(ps: PowerShellSession): Promise<void> {
   }
   spin.stop("Connected to Microsoft Graph.");
 
-  // 2. Fetch SKUs, subscriptions, and tenant ID in sequence
+  // 2. Fetch SKUs and subscriptions via Graph REST API
   spin.start("Fetching license and subscription data…");
   const stopTimer = elapsedTimer(spin, "Fetching license and subscription data");
 
-  const skuRaw = await ps.runCommandJson<SubscribedSku | SubscribedSku[]>(
-    [
-      `Get-MgSubscribedSku | Select-Object SkuId, SkuPartNumber, ConsumedUnits,`,
-      `@{N='Enabled';E={$_.PrepaidUnits.Enabled}},`,
-      `@{N='Warning';E={$_.PrepaidUnits.Warning}},`,
-      `@{N='Suspended';E={$_.PrepaidUnits.Suspended}}`,
-    ].join(" "),
-  );
-  const skuList = skuRaw ? (Array.isArray(skuRaw) ? skuRaw : [skuRaw]) : [];
-  const skuMap = new Map(skuList.map((s) => [s.SkuId, s]));
+  const graph = new GraphClient(ps);
 
-  const subsRaw = await ps.runCommandJson<Subscription | Subscription[]>(
-    [
-      `Get-MgDirectorySubscription -All | Select-Object Id, SkuId, SkuPartNumber,`,
-      `TotalLicenses, Status, IsTrial, CreatedDateTime, NextLifecycleDateTime`,
-    ].join(" "),
-  );
-  const subscriptions = subsRaw ? (Array.isArray(subsRaw) ? subsRaw : [subsRaw]) : [];
+  let skuList: SubscribedSku[];
+  let subscriptions: Subscription[];
+  try {
+    skuList = await graph.getAll<SubscribedSku>("/subscribedSkus", {
+      params: { $select: "skuId,skuPartNumber,consumedUnits,prepaidUnits" },
+    });
 
-  stopTimer();
+    subscriptions = await graph.getAll<Subscription>(
+      "/directory/subscriptions",
+      {
+        params: {
+          $select:
+            "id,skuId,skuPartNumber,totalLicenses,status,isTrial,createdDateTime,nextLifecycleDateTime",
+        },
+      },
+    );
+  } catch (e: any) {
+    spin.stop("Failed to fetch license and subscription data.");
+    p.log.error(e.message ?? String(e));
+    return;
+  } finally {
+    stopTimer();
+  }
+
+  const skuMap = new Map(skuList.map((s) => [s.skuId, s]));
   spin.stop(`Found ${subscriptions.length} subscription(s) across ${skuList.length} SKU(s).`);
 
   if (subscriptions.length === 0) {
@@ -104,10 +110,10 @@ export async function run(ps: PowerShellSession): Promise<void> {
     return;
   }
 
-  // 3. Sort: NextLifecycleDateTime ascending, nulls last
+  // 3. Sort: nextLifecycleDateTime ascending, nulls last
   subscriptions.sort((a, b) => {
-    const aDate = a.NextLifecycleDateTime;
-    const bDate = b.NextLifecycleDateTime;
+    const aDate = a.nextLifecycleDateTime;
+    const bDate = b.nextLifecycleDateTime;
     if (!aDate && !bDate) return 0;
     if (!aDate) return 1;
     if (!bDate) return -1;
@@ -116,22 +122,22 @@ export async function run(ps: PowerShellSession): Promise<void> {
 
   // 4. Build display rows
   const rows = subscriptions.map((sub) => {
-    const sku = skuMap.get(sub.SkuId);
-    const assigned = sku ? sku.ConsumedUnits : 0;
-    const available = sub.TotalLicenses - assigned;
+    const sku = skuMap.get(sub.skuId);
+    const assigned = sku ? sku.consumedUnits : 0;
+    const available = sub.totalLicenses - assigned;
 
     return {
-      subscriptionId: sub.Id,
-      skuPartNumber: sub.SkuPartNumber,
-      name: friendlySkuName(sub.SkuPartNumber),
-      status: sub.Status,
-      totalSeats: sub.TotalLicenses,
+      subscriptionId: sub.id,
+      skuPartNumber: sub.skuPartNumber,
+      name: friendlySkuName(sub.skuPartNumber),
+      status: sub.status,
+      totalSeats: sub.totalLicenses,
       assigned,
       available,
-      trial: sub.IsTrial ? "Yes" : "No",
-      renewalDate: formatDate(sub.NextLifecycleDateTime),
-      rawRenewalDate: sub.NextLifecycleDateTime,
-      daysUntilRenewal: daysUntil(sub.NextLifecycleDateTime),
+      trial: sub.isTrial ? "Yes" : "No",
+      renewalDate: formatDate(sub.nextLifecycleDateTime),
+      rawRenewalDate: sub.nextLifecycleDateTime,
+      daysUntilRenewal: daysUntil(sub.nextLifecycleDateTime),
     };
   });
 

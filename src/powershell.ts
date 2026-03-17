@@ -46,8 +46,14 @@ export class PowerShellSession {
   private process: Subprocess<"pipe", "pipe", "inherit"> | null = null;
   private decoder = new TextDecoder();
   private grantedScopes = new Set<string>();
+  private exchangeConnected = false;
   tenantId: string | null = null;
   tenantDomain: string | null = null;
+  onTenantResolved: ((domain: string) => void) | null = null;
+
+  get isExchangeConnected(): boolean {
+    return this.exchangeConnected;
+  }
 
   async start(): Promise<void> {
     this.process = Bun.spawn(["pwsh", "-NoLogo", "-NoProfile", "-Command", LOOP_SCRIPT], {
@@ -148,9 +154,43 @@ export class PowerShellSession {
     return false;
   }
 
+  async ensureExchangeConnected(): Promise<void> {
+    if (this.exchangeConnected) {
+      // Retry tenant metadata if it failed on first connect
+      if (!this.tenantDomain) {
+        try {
+          if (!this.tenantId) await this.extractTenantId();
+          await this.getTenantDomain();
+          if (this.tenantDomain) {
+            this.onTenantResolved?.(this.tenantDomain);
+          }
+        } catch {
+          // Best-effort metadata retry
+        }
+      }
+      return;
+    }
+
+    await this.connectExchangeOnline();
+    await this.extractTenantId();
+    try {
+      await this.getTenantDomain();
+      if (this.tenantDomain) {
+        this.onTenantResolved?.(this.tenantDomain);
+      }
+    } catch {
+      // Non-fatal — domain is metadata, connection itself succeeded
+    }
+  }
+
   async ensureGraphConnected(requiredScopes: string[]): Promise<void> {
     const missing = requiredScopes.filter((s) => !this.isScopeCovered(s));
     if (missing.length === 0) return;
+
+    // Try to get tenantId from Exchange if connected, but don't force Exchange connection
+    if (!this.tenantId && this.exchangeConnected) {
+      await this.extractTenantId();
+    }
 
     if (this.grantedScopes.size > 0) {
       try {
@@ -192,6 +232,22 @@ export class PowerShellSession {
     });
   }
 
+  async getGraphAccessToken(): Promise<string> {
+    // Microsoft.Graph SDK v2 does not expose AccessToken on Get-MgContext.
+    // The documented workaround is to issue a lightweight Graph request with
+    // -OutputType HttpResponseMessage and read the bearer token the SDK
+    // attached to the outgoing Authorization header.
+    const { output, error } = await this.runCommand(
+      `(Invoke-MgGraphRequest -Uri 'https://graph.microsoft.com/v1.0/organization?$select=id' -Method GET -OutputType HttpResponseMessage).RequestMessage.Headers.Authorization.Parameter`,
+    );
+    if (error || !output.trim()) {
+      throw new Error(
+        "Failed to extract Graph access token from PowerShell session",
+      );
+    }
+    return output.trim();
+  }
+
   async connectExchangeOnline(): Promise<void> {
     let cmd = "Connect-ExchangeOnline -ShowBanner:$false";
 
@@ -212,11 +268,13 @@ export class PowerShellSession {
         if (fallback.error) {
           throw new Error(`Failed to connect to Exchange Online: ${fallback.error}`);
         }
+        this.exchangeConnected = true;
         addBreadcrumb({ category: "lifecycle", message: "Exchange Online connected" });
         return;
       }
       throw new Error(`Failed to connect to Exchange Online: ${error}`);
     }
+    this.exchangeConnected = true;
     addBreadcrumb({ category: "lifecycle", message: "Exchange Online connected" });
   }
 
@@ -242,9 +300,7 @@ export class PowerShellSession {
     return this.tenantDomain;
   }
 
-  async switchTenant(): Promise<void> {
-    this.tenantId = null;
-
+  async disconnectTenant(): Promise<void> {
     if (this.grantedScopes.size > 0) {
       try {
         await this.runCommand("Disconnect-MgGraph *>$null");
@@ -254,16 +310,18 @@ export class PowerShellSession {
       this.grantedScopes = new Set();
     }
 
-    try {
-      await this.runCommand("Disconnect-ExchangeOnline -Confirm:$false *>$null");
-    } catch {
-      // Best-effort disconnect
+    if (this.exchangeConnected) {
+      try {
+        await this.runCommand("Disconnect-ExchangeOnline -Confirm:$false *>$null");
+      } catch {
+        // Best-effort disconnect
+      }
     }
 
-    await this.connectExchangeOnline();
-    await this.extractTenantId();
-    await this.getTenantDomain();
-    addBreadcrumb({ category: "lifecycle", message: "Tenant switched" });
+    this.exchangeConnected = false;
+    this.tenantId = null;
+    this.tenantDomain = null;
+    addBreadcrumb({ category: "lifecycle", message: "Tenant disconnected" });
   }
 
   async end(): Promise<void> {
@@ -278,10 +336,13 @@ export class PowerShellSession {
       this.grantedScopes = new Set();
     }
 
-    try {
-      await this.runCommand("Disconnect-ExchangeOnline -Confirm:$false *>$null");
-    } catch {
-      // Best-effort disconnect
+    if (this.exchangeConnected) {
+      try {
+        await this.runCommand("Disconnect-ExchangeOnline -Confirm:$false *>$null");
+      } catch {
+        // Best-effort disconnect
+      }
+      this.exchangeConnected = false;
     }
 
     try {

@@ -40,6 +40,8 @@ function dateOffset(days: number): string {
 }
 
 export async function run(ps: PowerShellSession): Promise<void> {
+  await ps.ensureExchangeConnected();
+
   // Sender
   const sender = await p.text({
     message: "Sender email (leave blank for any)",

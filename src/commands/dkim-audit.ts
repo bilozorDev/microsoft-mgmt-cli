@@ -267,6 +267,8 @@ async function exportExcel(ps: PowerShellSession): Promise<void> {
 }
 
 export async function run(ps: PowerShellSession): Promise<void> {
+  await ps.ensureExchangeConnected();
+
   while (true) {
     const action = await p.select({
       message: "DKIM / Email Authentication",

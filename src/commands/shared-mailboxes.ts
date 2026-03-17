@@ -35,6 +35,8 @@ function truncate(s: string, len: number): string {
 }
 
 export async function run(ps: PowerShellSession): Promise<void> {
+  await ps.ensureExchangeConnected();
+
   const spin = p.spinner();
   spin.start("Fetching shared mailboxes…");
 

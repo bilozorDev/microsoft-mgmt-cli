@@ -3,6 +3,13 @@ import type { PowerShellSession } from "../powershell.ts";
 import { generatePassword, validatePassword } from "../password.ts";
 import { friendlySkuName } from "../sku-names.ts";
 import { escapePS, createSecretLink } from "../utils.ts";
+import {
+  type AuthMethod,
+  MFA_DETAIL_CMDS,
+  MFA_REMOVE_CMDLETS,
+  friendlyMfaMethod,
+  mfaTypeKey,
+} from "../mfa-utils.ts";
 import { run as addToDistributionGroup } from "./add-to-distribution-group.ts";
 import { run as addToSecurityGroup } from "./add-to-security-group.ts";
 import { run as addToSharedMailbox } from "./add-to-shared-mailbox.ts";
@@ -33,11 +40,39 @@ interface AcceptedDomain {
   Default: boolean;
 }
 
+interface RoleDefinition {
+  Id: string;
+  DisplayName: string;
+  Description: string | null;
+}
+
+interface RoleAssignment {
+  Id: string;
+  RoleDefinitionId: string;
+  PrincipalId: string;
+}
+
 interface SubscribedSku {
   SkuId: string;
   SkuPartNumber: string;
   ConsumedUnits: number;
   PrepaidUnits: { Enabled: number; [key: string]: unknown };
+}
+
+interface ForwardingConfig {
+  ForwardingSmtpAddress: string | null;
+  ForwardingAddress: string | null;
+  DeliverToMailboxAndForward: boolean;
+}
+
+interface MailboxPermission {
+  User: string;
+  AccessRights: string | string[];
+}
+
+interface RecipientPermission {
+  Trustee: string;
+  AccessRights: string | string[];
 }
 
 async function fetchUsers(ps: PowerShellSession): Promise<MgUser[]> {
@@ -170,7 +205,7 @@ export async function run(ps: PowerShellSession): Promise<void> {
   const graphSpin = p.spinner();
   graphSpin.start("Connecting to Microsoft Graph (check your browser)...");
   try {
-    await ps.ensureGraphConnected(["User.ReadWrite.All", "Organization.Read.All", "GroupMember.ReadWrite.All", "User-PasswordProfile.ReadWrite.All"]);
+    await ps.ensureGraphConnected(["User.ReadWrite.All", "Organization.Read.All", "GroupMember.ReadWrite.All", "User-PasswordProfile.ReadWrite.All", "RoleManagement.ReadWrite.Directory", "UserAuthenticationMethod.ReadWrite.All"]);
     graphSpin.stop("Connected to Microsoft Graph.");
   } catch (e) {
     graphSpin.stop("Failed to connect to Microsoft Graph.");
@@ -202,6 +237,14 @@ export async function run(ps: PowerShellSession): Promise<void> {
   let otsUrl: string | null = null;
   let domainChangedFrom: string | null = null;
   const aliasesAdded: string[] = [];
+  const rolesAdded: string[] = [];
+  const rolesRemoved: string[] = [];
+  let signInToggled: "blocked" | "unblocked" | null = null;
+  const delegationsAdded: string[] = [];
+  const delegationsRemoved: string[] = [];
+  let forwardingSet: string | null = null;
+  let forwardingRemoved = false;
+  const mfaMethodsRemoved: string[] = [];
   let acceptedDomains: AcceptedDomain[] | null = null;
 
   while (true) {
@@ -210,15 +253,20 @@ export async function run(ps: PowerShellSession): Promise<void> {
       { value: "change-domain", label: "Change primary domain", hint: upn.split("@")[1] },
       { value: "add-alias", label: "Add email alias" },
       { value: "reset-password", label: "Reset password" },
+      { value: "toggle-signin", label: current.details.AccountEnabled ? "Block sign-in" : "Unblock sign-in" },
       { value: "manage-licenses", label: "Manage licenses" },
+      { value: "manage-roles", label: "Manage admin roles" },
+      { value: "reset-mfa", label: "Reset MFA methods" },
+      { value: "manage-delegation", label: "Manage mailbox delegation" },
+      { value: "email-forwarding", label: "Email forwarding" },
       { value: "add-distribution-group", label: "Add to distribution group" },
       { value: "add-security-group", label: "Add to security group" },
       { value: "add-shared-mailbox", label: "Add to shared mailbox" },
     ];
     if (otsUrl) {
       menuOptions.push({ value: "copy-ots", label: "Copy OTS link to clipboard" });
-      menuOptions.push({ value: "copy-ticket", label: "Copy ticket update note to clipboard" });
     }
+    menuOptions.push({ value: "copy-ticket", label: "Copy ticket update note to clipboard" });
     menuOptions.push({ value: "done", label: "Done" });
 
     const action = await p.select({
@@ -435,6 +483,476 @@ export async function run(ps: PowerShellSession): Promise<void> {
         break;
       }
 
+      case "manage-roles": {
+        const roleSpin = p.spinner();
+        roleSpin.start("Fetching admin roles…");
+
+        let roleDefs: RoleDefinition[];
+        try {
+          const raw = await ps.runCommandJson<RoleDefinition | RoleDefinition[]>(
+            `Get-MgRoleManagementDirectoryRoleDefinition -All | Select-Object Id, DisplayName, Description`,
+          );
+          roleDefs = raw ? (Array.isArray(raw) ? raw : [raw]) : [];
+        } catch (e) {
+          roleSpin.stop("Failed to fetch roles.");
+          p.log.error(`${e}`);
+          break;
+        }
+
+        // Get current assignments for this user
+        let currentAssignments: RoleAssignment[];
+        try {
+          const raw = await ps.runCommandJson<RoleAssignment | RoleAssignment[]>(
+            `Get-MgRoleManagementDirectoryRoleAssignment -Filter "principalId eq '${escapePS(userId)}'" -All | Select-Object Id, RoleDefinitionId, PrincipalId`,
+          );
+          currentAssignments = raw ? (Array.isArray(raw) ? raw : [raw]) : [];
+        } catch {
+          currentAssignments = [];
+        }
+
+        roleSpin.stop(`Found ${roleDefs.length} role(s), user has ${currentAssignments.length} assigned.`);
+
+        const currentRoleIds = new Set(currentAssignments.map((a) => a.RoleDefinitionId));
+
+        // Sort: assigned first, then alphabetical
+        roleDefs.sort((a, b) => {
+          const aAssigned = currentRoleIds.has(a.Id) ? 0 : 1;
+          const bAssigned = currentRoleIds.has(b.Id) ? 0 : 1;
+          if (aAssigned !== bAssigned) return aAssigned - bAssigned;
+          return a.DisplayName.localeCompare(b.DisplayName);
+        });
+
+        const choices = await p.multiselect({
+          message: "Toggle admin roles (space to toggle, enter to confirm)",
+          options: roleDefs.map((r) => ({
+            value: r.Id,
+            label: r.DisplayName,
+            hint: r.Description ? r.Description.slice(0, 60) : undefined,
+          })),
+          initialValues: roleDefs.filter((r) => currentRoleIds.has(r.Id)).map((r) => r.Id),
+          required: false,
+        });
+        if (p.isCancel(choices)) break;
+
+        const selectedSet = new Set(choices);
+        const toAdd = roleDefs.filter((r) => selectedSet.has(r.Id) && !currentRoleIds.has(r.Id));
+        const toRemove = roleDefs.filter((r) => !selectedSet.has(r.Id) && currentRoleIds.has(r.Id));
+
+        if (toAdd.length === 0 && toRemove.length === 0) {
+          p.log.info("No changes.");
+          break;
+        }
+
+        const summaryLines: string[] = [];
+        if (toAdd.length > 0) summaryLines.push(`Add:    ${toAdd.map((r) => r.DisplayName).join(", ")}`);
+        if (toRemove.length > 0) summaryLines.push(`Remove: ${toRemove.map((r) => r.DisplayName).join(", ")}`);
+        p.note(summaryLines.join("\n"), "Role changes");
+
+        const confirm = await p.confirm({ message: "Apply these changes?" });
+        if (p.isCancel(confirm) || !confirm) break;
+
+        const spin = p.spinner();
+        spin.start("Updating roles…");
+
+        const runRolesAdded: string[] = [];
+        const runRolesRemoved: string[] = [];
+
+        // Add roles
+        for (const r of toAdd) {
+          spin.message(`Adding ${r.DisplayName}…`);
+          const { error } = await ps.runCommand(
+            `New-MgRoleManagementDirectoryRoleAssignment -RoleDefinitionId '${escapePS(r.Id)}' -PrincipalId '${escapePS(userId)}' -DirectoryScopeId '/'`,
+          );
+          if (error) {
+            p.log.error(`Failed to add ${r.DisplayName}: ${error}`);
+          } else {
+            runRolesAdded.push(r.DisplayName);
+            rolesAdded.push(r.DisplayName);
+          }
+        }
+
+        // Remove roles
+        for (const r of toRemove) {
+          spin.message(`Removing ${r.DisplayName}…`);
+          const assignment = currentAssignments.find((a) => a.RoleDefinitionId === r.Id);
+          if (!assignment) continue;
+          const { error } = await ps.runCommand(
+            `Remove-MgRoleManagementDirectoryRoleAssignment -UnifiedRoleAssignmentId '${escapePS(assignment.Id)}'`,
+          );
+          if (error) {
+            p.log.error(`Failed to remove ${r.DisplayName}: ${error}`);
+          } else {
+            runRolesRemoved.push(r.DisplayName);
+            rolesRemoved.push(r.DisplayName);
+          }
+        }
+
+        const parts: string[] = [];
+        if (runRolesAdded.length > 0) parts.push(`Added: ${runRolesAdded.join(", ")}`);
+        if (runRolesRemoved.length > 0) parts.push(`Removed: ${runRolesRemoved.join(", ")}`);
+        spin.stop(parts.length > 0 ? parts.join(". ") + "." : "No changes applied.");
+        break;
+      }
+
+      case "toggle-signin": {
+        const newState = current.details.AccountEnabled ? false : true;
+        const label = newState ? "Unblocking" : "Blocking";
+        const spin = p.spinner();
+        spin.start(`${label} sign-in...`);
+        const { error } = await ps.runCommand(
+          `Update-MgUser -UserId '${escapePS(userId)}' -AccountEnabled:$${newState}`,
+        );
+        if (error) {
+          spin.stop(`Failed to ${label.toLowerCase()} sign-in.`);
+          p.log.error(error);
+        } else {
+          current.details.AccountEnabled = newState;
+          signInToggled = newState ? "unblocked" : "blocked";
+          spin.stop(`Sign-in ${newState ? "unblocked" : "blocked"}.`);
+        }
+        break;
+      }
+
+      case "reset-mfa": {
+        const mfaSpin = p.spinner();
+        mfaSpin.start("Fetching MFA methods...");
+
+        const raw = await ps.runCommandJson<AuthMethod | AuthMethod[]>(
+          `Get-MgUserAuthenticationMethod -UserId '${escapePS(userId)}' | ForEach-Object { [PSCustomObject]@{ Id = $_.Id; ODataType = $_.AdditionalProperties['@odata.type'] } }`,
+        );
+        const methods = raw ? (Array.isArray(raw) ? raw : [raw]) : [];
+
+        const removable = methods.filter((m) => {
+          if (!m.ODataType) return false;
+          const key = mfaTypeKey(m.ODataType);
+          return key !== "passwordAuthenticationMethod" && key in MFA_REMOVE_CMDLETS;
+        });
+
+        if (removable.length === 0) {
+          mfaSpin.stop("No removable MFA methods found (only password).");
+          break;
+        }
+
+        // Fetch details for each method
+        mfaSpin.message("Fetching method details...");
+        const methodDetails: { method: AuthMethod; friendly: string; detail: string }[] = [];
+
+        for (const m of removable) {
+          const key = mfaTypeKey(m.ODataType!);
+          const friendly = friendlyMfaMethod(m.ODataType!) ?? key;
+          let detail = "";
+
+          const detailFetcher = MFA_DETAIL_CMDS[key];
+          if (detailFetcher) {
+            try {
+              const detailRaw = await ps.runCommandJson<Record<string, unknown>>(
+                detailFetcher.cmd(userId, m.Id),
+              );
+              if (detailRaw) detail = detailFetcher.format(detailRaw);
+            } catch {
+              // detail stays empty
+            }
+          }
+
+          methodDetails.push({ method: m, friendly, detail });
+        }
+
+        mfaSpin.stop(`Found ${removable.length} MFA method(s).`);
+
+        const choices = await p.multiselect({
+          message: "Select MFA methods to remove (space to toggle, enter to confirm)",
+          options: methodDetails.map((d) => ({
+            value: d.method.Id,
+            label: d.friendly,
+            hint: d.detail || undefined,
+          })),
+          required: false,
+        });
+        if (p.isCancel(choices) || choices.length === 0) break;
+
+        const removeSpin = p.spinner();
+        removeSpin.start("Removing selected MFA methods...");
+
+        const runMfaRemoved: string[] = [];
+        for (const methodId of choices) {
+          const detail = methodDetails.find((d) => d.method.Id === methodId)!;
+          const key = mfaTypeKey(detail.method.ODataType!);
+          const info = MFA_REMOVE_CMDLETS[key]!;
+
+          removeSpin.message(`Removing ${detail.friendly}...`);
+          const { error } = await ps.runCommand(
+            `${info.cmdlet} -UserId '${escapePS(userId)}' ${info.param} '${escapePS(methodId)}'`,
+          );
+          if (error) {
+            p.log.error(`Failed to remove ${detail.friendly}: ${error}`);
+          } else {
+            runMfaRemoved.push(detail.friendly);
+            mfaMethodsRemoved.push(detail.friendly);
+          }
+        }
+
+        removeSpin.stop(
+          runMfaRemoved.length > 0
+            ? `Removed ${runMfaRemoved.length} MFA method(s).`
+            : "No methods removed.",
+        );
+        break;
+      }
+
+      case "manage-delegation": {
+        const delegAction = await p.select({
+          message: "Mailbox delegation",
+          options: [
+            { value: "add", label: "Add delegation" },
+            { value: "remove", label: "Remove delegation" },
+            { value: "back", label: "Back" },
+          ],
+        });
+        if (p.isCancel(delegAction) || delegAction === "back") break;
+
+        if (delegAction === "add") {
+          const delegate = await selectUser(ps, "Select delegate user");
+          if (!delegate) break;
+
+          const permTypes = await p.multiselect({
+            message: "Select permission types to grant",
+            options: [
+              { value: "FullAccess", label: "Full Access", hint: "read/manage mailbox" },
+              { value: "SendAs", label: "Send As", hint: "send email as this user" },
+              { value: "SendOnBehalf", label: "Send on Behalf", hint: "send on behalf of this user" },
+            ],
+            required: true,
+          });
+          if (p.isCancel(permTypes)) break;
+
+          const delegSpin = p.spinner();
+          delegSpin.start("Adding delegation...");
+          const addedCount = delegationsAdded.length;
+
+          for (const perm of permTypes) {
+            delegSpin.message(`Adding ${perm}...`);
+            let error: string;
+            if (perm === "FullAccess") {
+              ({ error } = await ps.runCommand(
+                `Add-MailboxPermission -Identity '${escapePS(upn)}' -User '${escapePS(delegate.UserPrincipalName)}' -AccessRights FullAccess -InheritanceType All -Confirm:$false`,
+              ));
+            } else if (perm === "SendAs") {
+              ({ error } = await ps.runCommand(
+                `Add-RecipientPermission -Identity '${escapePS(upn)}' -Trustee '${escapePS(delegate.UserPrincipalName)}' -AccessRights SendAs -Confirm:$false`,
+              ));
+            } else {
+              ({ error } = await ps.runCommand(
+                `Set-Mailbox -Identity '${escapePS(upn)}' -GrantSendOnBehalfTo @{Add='${escapePS(delegate.UserPrincipalName)}'}`,
+              ));
+            }
+            if (error) {
+              p.log.error(`Failed to add ${perm}: ${error}`);
+            } else {
+              delegationsAdded.push(`${perm} → ${delegate.DisplayName}`);
+            }
+          }
+
+          const newlyAdded = delegationsAdded.length - addedCount;
+          delegSpin.stop(
+            newlyAdded > 0
+              ? `Added ${newlyAdded} delegation(s).`
+              : "No delegations added.",
+          );
+        } else {
+          // Remove delegation
+          const fetchSpin = p.spinner();
+          fetchSpin.start("Fetching current delegations...");
+
+          const allDelegations: { value: string; label: string; hint: string }[] = [];
+
+          // Full Access
+          try {
+            const faRaw = await ps.runCommandJson<MailboxPermission | MailboxPermission[]>(
+              `Get-MailboxPermission -Identity '${escapePS(upn)}' | Where-Object { $_.User -ne 'NT AUTHORITY\\SELF' -and $_.IsInherited -eq $false } | Select-Object User,AccessRights`,
+            );
+            const fa = faRaw ? (Array.isArray(faRaw) ? faRaw : [faRaw]) : [];
+            for (const perm of fa) {
+              const rights = Array.isArray(perm.AccessRights)
+                ? perm.AccessRights
+                : [String(perm.AccessRights)];
+              if (!rights.some((r) => r.includes("FullAccess"))) continue;
+              allDelegations.push({
+                value: `FullAccess:${perm.User}`,
+                label: perm.User,
+                hint: "Full Access",
+              });
+            }
+          } catch { /* no mailbox */ }
+
+          // Send As
+          try {
+            const saRaw = await ps.runCommandJson<RecipientPermission | RecipientPermission[]>(
+              `Get-RecipientPermission -Identity '${escapePS(upn)}' | Where-Object { $_.Trustee -ne 'NT AUTHORITY\\SELF' } | Select-Object Trustee,AccessRights`,
+            );
+            const sa = saRaw ? (Array.isArray(saRaw) ? saRaw : [saRaw]) : [];
+            for (const perm of sa) {
+              allDelegations.push({
+                value: `SendAs:${perm.Trustee}`,
+                label: perm.Trustee,
+                hint: "Send As",
+              });
+            }
+          } catch { /* no mailbox */ }
+
+          // Send on Behalf
+          try {
+            const { output, error: sobError } = await ps.runCommand(
+              `$mbx = Get-Mailbox -Identity '${escapePS(upn)}' -ErrorAction SilentlyContinue; if ($mbx -and $mbx.GrantSendOnBehalfTo.Count -gt 0) { ($mbx.GrantSendOnBehalfTo | ForEach-Object { (Get-Recipient $_ -ErrorAction SilentlyContinue).PrimarySmtpAddress }) -join ',' } else { '' }`,
+            );
+            if (!sobError && output.trim()) {
+              for (const u of output.trim().split(",").filter(Boolean)) {
+                allDelegations.push({
+                  value: `SendOnBehalf:${u}`,
+                  label: u,
+                  hint: "Send on Behalf",
+                });
+              }
+            }
+          } catch { /* no mailbox */ }
+
+          fetchSpin.stop(`Found ${allDelegations.length} delegation(s).`);
+
+          if (allDelegations.length === 0) {
+            p.log.info("No delegations to remove.");
+            break;
+          }
+
+          const toRemove = await p.multiselect({
+            message: "Select delegations to remove",
+            options: allDelegations,
+            required: false,
+          });
+          if (p.isCancel(toRemove) || toRemove.length === 0) break;
+
+          const removeSpin = p.spinner();
+          removeSpin.start("Removing delegations...");
+
+          const runDelegRemoved: string[] = [];
+          for (const entry of toRemove) {
+            const [type, ...userParts] = entry.split(":");
+            const delegateUser = userParts.join(":");
+            removeSpin.message(`Removing ${type} for ${delegateUser}...`);
+
+            let error: string;
+            if (type === "FullAccess") {
+              ({ error } = await ps.runCommand(
+                `Remove-MailboxPermission -Identity '${escapePS(upn)}' -User '${escapePS(delegateUser)}' -AccessRights FullAccess -InheritanceType All -Confirm:$false`,
+              ));
+            } else if (type === "SendAs") {
+              ({ error } = await ps.runCommand(
+                `Remove-RecipientPermission -Identity '${escapePS(upn)}' -Trustee '${escapePS(delegateUser)}' -AccessRights SendAs -Confirm:$false`,
+              ));
+            } else {
+              ({ error } = await ps.runCommand(
+                `Set-Mailbox -Identity '${escapePS(upn)}' -GrantSendOnBehalfTo @{Remove='${escapePS(delegateUser)}'}`,
+              ));
+            }
+            if (error) {
+              p.log.error(`Failed to remove ${type} for ${delegateUser}: ${error}`);
+            } else {
+              runDelegRemoved.push(`${type} ← ${delegateUser}`);
+              delegationsRemoved.push(`${type} ← ${delegateUser}`);
+            }
+          }
+
+          removeSpin.stop(
+            runDelegRemoved.length > 0
+              ? `Removed ${runDelegRemoved.length} delegation(s).`
+              : "No delegations removed.",
+          );
+        }
+        break;
+      }
+
+      case "email-forwarding": {
+        const fwdSpin = p.spinner();
+        fwdSpin.start("Checking current forwarding...");
+
+        const fwdRaw = await ps.runCommandJson<ForwardingConfig>(
+          `Get-Mailbox -Identity '${escapePS(upn)}' | Select-Object ForwardingSmtpAddress,ForwardingAddress,DeliverToMailboxAndForward`,
+        );
+
+        if (!fwdRaw) {
+          fwdSpin.stop("Could not read mailbox forwarding.");
+          break;
+        }
+
+        const hasForwarding =
+          (fwdRaw.ForwardingSmtpAddress && fwdRaw.ForwardingSmtpAddress !== "") ||
+          (fwdRaw.ForwardingAddress && fwdRaw.ForwardingAddress !== "");
+
+        if (hasForwarding) {
+          fwdSpin.stop("Forwarding is active.");
+          p.note(
+            [
+              `SMTP Forward:    ${fwdRaw.ForwardingSmtpAddress ?? "(none)"}`,
+              `Forward Address: ${fwdRaw.ForwardingAddress ?? "(none)"}`,
+              `Keep copy:       ${fwdRaw.DeliverToMailboxAndForward}`,
+            ].join("\n"),
+            "Current Forwarding",
+          );
+
+          const removeConfirm = await p.confirm({
+            message: "Remove forwarding?",
+          });
+          if (p.isCancel(removeConfirm) || !removeConfirm) break;
+
+          const removeSpin = p.spinner();
+          removeSpin.start("Removing forwarding...");
+          const { error } = await ps.runCommand(
+            `Set-Mailbox -Identity '${escapePS(upn)}' -ForwardingSmtpAddress $null -ForwardingAddress $null -DeliverToMailboxAndForward $false`,
+          );
+          if (error) {
+            removeSpin.stop("Failed to remove forwarding.");
+            p.log.error(error);
+          } else {
+            removeSpin.stop("Forwarding removed.");
+            forwardingRemoved = true;
+          }
+        } else {
+          fwdSpin.stop("No forwarding configured.");
+
+          const setConfirm = await p.confirm({
+            message: "Set up email forwarding?",
+          });
+          if (p.isCancel(setConfirm) || !setConfirm) break;
+
+          const targetEmail = await p.text({
+            message: "Forward to email address",
+            validate: (v = "") => {
+              if (!v.trim()) return "Email is required";
+              if (!v.includes("@")) return "Enter a valid email address";
+            },
+          });
+          if (p.isCancel(targetEmail)) break;
+
+          const keepCopy = await p.confirm({
+            message: "Keep a copy in the original mailbox?",
+            initialValue: true,
+          });
+          if (p.isCancel(keepCopy)) break;
+
+          const setSpin = p.spinner();
+          setSpin.start("Setting forwarding...");
+          const { error } = await ps.runCommand(
+            `Set-Mailbox -Identity '${escapePS(upn)}' -ForwardingSmtpAddress 'smtp:${escapePS(targetEmail)}' -DeliverToMailboxAndForward $${keepCopy}`,
+          );
+          if (error) {
+            setSpin.stop("Failed to set forwarding.");
+            p.log.error(error);
+          } else {
+            setSpin.stop(`Forwarding set to ${targetEmail}${keepCopy ? " (keeping copy)" : ""}.`);
+            forwardingSet = targetEmail;
+          }
+        }
+        break;
+      }
+
       case "add-distribution-group": {
         const items = await addToDistributionGroup(ps, upn);
         addedDistGroups.push(...items);
@@ -620,6 +1138,30 @@ export async function run(ps: PowerShellSession): Promise<void> {
         }
         if (licensesRemoved.length > 0) {
           lines.push(`Removed license(s): ${licensesRemoved.join(", ")}.`);
+        }
+        if (rolesAdded.length > 0) {
+          lines.push(`Added admin role(s): ${rolesAdded.join(", ")}.`);
+        }
+        if (rolesRemoved.length > 0) {
+          lines.push(`Removed admin role(s): ${rolesRemoved.join(", ")}.`);
+        }
+        if (signInToggled) {
+          lines.push(`${signInToggled === "blocked" ? "Blocked" : "Unblocked"} sign-in for ${current.details.DisplayName}.`);
+        }
+        if (delegationsAdded.length > 0) {
+          lines.push(`Added mailbox delegation(s): ${delegationsAdded.join(", ")}.`);
+        }
+        if (delegationsRemoved.length > 0) {
+          lines.push(`Removed mailbox delegation(s): ${delegationsRemoved.join(", ")}.`);
+        }
+        if (forwardingSet) {
+          lines.push(`Set email forwarding to ${forwardingSet}.`);
+        }
+        if (forwardingRemoved) {
+          lines.push("Removed email forwarding.");
+        }
+        if (mfaMethodsRemoved.length > 0) {
+          lines.push(`Removed MFA method(s): ${mfaMethodsRemoved.join(", ")}.`);
         }
 
         const allGroups: string[] = [];

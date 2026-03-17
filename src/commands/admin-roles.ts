@@ -3,26 +3,30 @@ import { mkdirSync, chmodSync } from "fs";
 import * as p from "@clack/prompts";
 import type { PowerShellSession } from "../powershell.ts";
 import { generateReport } from "../report-template.ts";
-import { appDir, escapePS } from "../utils.ts";
+import { appDir } from "../utils.ts";
+import { GraphClient } from "../graph-client.ts";
 
 interface DirectoryRole {
-  Id: string;
-  DisplayName: string;
+  id: string;
+  displayName: string;
 }
 
 interface RoleMember {
-  Id: string;
-  ODataType: string | null;
-  DisplayName: string | null;
-  UserPrincipalName: string | null;
+  "@odata.type"?: string;
+  id: string;
+  displayName?: string;
+  userPrincipalName?: string;
 }
 
 interface AdminUserDetails {
-  DisplayName: string;
-  UserPrincipalName: string;
-  AccountEnabled: boolean;
-  CreatedDateTime: string | null;
-  LastSignIn: string | null;
+  displayName: string;
+  userPrincipalName: string;
+  accountEnabled: boolean;
+  createdDateTime: string | null;
+  signInActivity?: {
+    lastSuccessfulSignInDateTime: string | null;
+    lastSignInDateTime: string | null;
+  };
 }
 
 interface AdminEntry {
@@ -76,16 +80,25 @@ export async function run(ps: PowerShellSession): Promise<void> {
     "Note: This report only includes permanently assigned roles. PIM-eligible (just-in-time) role assignments are not captured.",
   );
 
-  // 2. Fetch all activated directory roles
+  // 2. Fetch all activated directory roles via Graph REST API
   spin.start("Fetching directory roles…");
   const stopTimer = elapsedTimer(spin, "Fetching directory roles");
 
-  const rolesRaw = await ps.runCommandJson<DirectoryRole | DirectoryRole[]>(
-    `Get-MgDirectoryRole -All | Select-Object Id, DisplayName`,
-  );
-  const roles = rolesRaw ? (Array.isArray(rolesRaw) ? rolesRaw : [rolesRaw]) : [];
+  const graph = new GraphClient(ps);
 
-  stopTimer();
+  let roles: DirectoryRole[];
+  try {
+    roles = await graph.getAll<DirectoryRole>("/directoryRoles", {
+      params: { $select: "id,displayName" },
+    });
+  } catch (e: any) {
+    spin.stop("Failed to fetch directory roles.");
+    p.log.error(e.message ?? String(e));
+    return;
+  } finally {
+    stopTimer();
+  }
+
   spin.stop(`Found ${roles.length} activated role(s).`);
 
   if (roles.length === 0) {
@@ -100,41 +113,33 @@ export async function run(ps: PowerShellSession): Promise<void> {
 
   for (let i = 0; i < roles.length; i++) {
     const role = roles[i]!;
-    spin.message(`Fetching role members (${i + 1}/${roles.length}) — ${role.DisplayName}…`);
+    spin.message(`Fetching role members (${i + 1}/${roles.length}) — ${role.displayName}…`);
 
     let members: RoleMember[] = [];
     try {
-      const membersRaw = await ps.runCommandJson<RoleMember | RoleMember[]>(
-        [
-          `Get-MgDirectoryRoleMember -DirectoryRoleId '${escapePS(role.Id)}' -All | ForEach-Object {`,
-          `[PSCustomObject]@{`,
-          `Id = $_.Id;`,
-          `ODataType = $_.AdditionalProperties['@odata.type'];`,
-          `DisplayName = $_.AdditionalProperties['displayName'];`,
-          `UserPrincipalName = $_.AdditionalProperties['userPrincipalName']`,
-          `} }`,
-        ].join(" "),
+      members = await graph.getAll<RoleMember>(
+        `/directoryRoles/${role.id}/members`,
+        { params: { $select: "id,displayName,userPrincipalName" } },
       );
-      members = membersRaw ? (Array.isArray(membersRaw) ? membersRaw : [membersRaw]) : [];
     } catch {
       // Skip roles where member listing fails
     }
 
     for (const m of members) {
       // Only include user objects
-      if (!m.ODataType || !m.ODataType.includes("user")) continue;
-      if (!m.Id) continue;
+      if (!m["@odata.type"]?.includes("user")) continue;
+      if (!m.id) continue;
 
       totalAssignments++;
-      const existing = admins.get(m.Id);
+      const existing = admins.get(m.id);
       if (existing) {
-        existing.roles.push(role.DisplayName);
+        existing.roles.push(role.displayName);
       } else {
-        admins.set(m.Id, {
-          id: m.Id,
-          displayName: m.DisplayName ?? "(unknown)",
-          upn: m.UserPrincipalName ?? "",
-          roles: [role.DisplayName],
+        admins.set(m.id, {
+          id: m.id,
+          displayName: m.displayName ?? "(unknown)",
+          upn: m.userPrincipalName ?? "",
+          roles: [role.displayName],
           accountEnabled: true,
           createdDateTime: null,
           lastSignIn: null,
@@ -149,37 +154,40 @@ export async function run(ps: PowerShellSession): Promise<void> {
     return;
   }
 
-  // 4. Fetch sign-in activity and created date for each admin
+  // 4. Fetch sign-in activity and created date for each admin (batched in groups of 5)
   const adminList = Array.from(admins.values());
   spin.start(`Fetching admin details (0/${adminList.length})…`);
 
-  for (let i = 0; i < adminList.length; i++) {
-    const admin = adminList[i]!;
-    spin.message(`Fetching admin details (${i + 1}/${adminList.length})…`);
+  const batchSize = 5;
+  for (let i = 0; i < adminList.length; i += batchSize) {
+    const batch = adminList.slice(i, i + batchSize);
+    spin.message(`Fetching admin details (${Math.min(i + batchSize, adminList.length)}/${adminList.length})…`);
 
-    try {
-      const detailRaw = await ps.runCommandJson<AdminUserDetails>(
-        [
-          `Get-MgUser -UserId '${escapePS(admin.id)}' -Property 'DisplayName','UserPrincipalName','AccountEnabled','CreatedDateTime','SignInActivity'`,
-          `| ForEach-Object { [PSCustomObject]@{`,
-          `DisplayName = $_.DisplayName;`,
-          `UserPrincipalName = $_.UserPrincipalName;`,
-          `AccountEnabled = $_.AccountEnabled;`,
-          `CreatedDateTime = $_.CreatedDateTime;`,
-          `LastSignIn = $_.SignInActivity.LastSuccessfulSignInDateTime`,
-          `} }`,
-        ].join(" "),
-      );
-      if (detailRaw) {
-        admin.displayName = detailRaw.DisplayName ?? admin.displayName;
-        admin.upn = detailRaw.UserPrincipalName ?? admin.upn;
-        admin.accountEnabled = detailRaw.AccountEnabled;
-        admin.createdDateTime = detailRaw.CreatedDateTime;
-        admin.lastSignIn = detailRaw.LastSignIn;
-      }
-    } catch {
-      // Keep defaults if user lookup fails
-    }
+    await Promise.all(
+      batch.map(async (admin) => {
+        try {
+          const detail = await graph.request<AdminUserDetails>(
+            `/users/${admin.id}`,
+            {
+              params: {
+                $select:
+                  "displayName,userPrincipalName,accountEnabled,createdDateTime,signInActivity",
+              },
+            },
+          );
+          admin.displayName = detail.displayName ?? admin.displayName;
+          admin.upn = detail.userPrincipalName ?? admin.upn;
+          admin.accountEnabled = detail.accountEnabled;
+          admin.createdDateTime = detail.createdDateTime;
+          admin.lastSignIn =
+            detail.signInActivity?.lastSuccessfulSignInDateTime ??
+            detail.signInActivity?.lastSignInDateTime ??
+            null;
+        } catch {
+          // Keep defaults if user lookup fails
+        }
+      }),
+    );
   }
   spin.stop(`Fetched details for ${adminList.length} admin(s).`);
 

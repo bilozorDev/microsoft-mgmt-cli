@@ -1,11 +1,11 @@
 import * as p from "@clack/prompts";
 import type { PowerShellSession } from "../powershell.ts";
-import { escapePS } from "../utils.ts";
+import { GraphClient } from "../graph-client.ts";
 
 interface SecurityGroup {
-  DisplayName: string;
-  Id: string;
-  Mail: string | null;
+  displayName: string;
+  id: string;
+  mail: string | null;
 }
 
 export async function run(ps: PowerShellSession, upn: string): Promise<{ name: string; email: string } | null> {
@@ -21,17 +21,24 @@ export async function run(ps: PowerShellSession, upn: string): Promise<{ name: s
     return null;
   }
 
+  const graph = new GraphClient(ps);
+
   const spin = p.spinner();
   spin.start("Fetching security groups...");
 
   let groups: SecurityGroup[];
   try {
-    const raw = await ps.runCommandJson<SecurityGroup | SecurityGroup[]>(
-      'Get-MgGroup -Filter "securityEnabled eq true" -All | Select-Object DisplayName, Id, Mail',
-    );
-    groups = (raw ? (Array.isArray(raw) ? raw : [raw]) : []).sort((a, b) =>
-      a.DisplayName.localeCompare(b.DisplayName),
-    );
+    groups = (
+      await graph.getAll<SecurityGroup>("/groups", {
+        params: {
+          $filter: "securityEnabled eq true",
+          $select: "displayName,id,mail",
+          $count: "true",
+          $top: "999",
+        },
+        headers: { ConsistencyLevel: "eventual" },
+      })
+    ).sort((a, b) => a.displayName.localeCompare(b.displayName));
     spin.stop(`Found ${groups.length} security group(s).`);
   } catch (e) {
     spin.stop("Failed to fetch security groups.");
@@ -47,28 +54,35 @@ export async function run(ps: PowerShellSession, upn: string): Promise<{ name: s
   const groupId = await p.select({
     message: "Select security group (esc to go back)",
     options: groups.map((g) => ({
-      value: g.Id,
-      label: g.DisplayName,
-      hint: g.Mail ?? undefined,
+      value: g.id,
+      label: g.displayName,
+      hint: g.mail ?? undefined,
     })),
   });
   if (p.isCancel(groupId)) return null;
 
   const addSpin = p.spinner();
-  const group = groups.find((g) => g.Id === groupId);
-  const groupName = group?.DisplayName ?? groupId;
+  const group = groups.find((g) => g.id === groupId);
+  const groupName = group?.displayName ?? groupId;
   addSpin.start(`Adding ${upn} to ${groupName}...`);
 
-  const { error } = await ps.runCommand(
-    `New-MgGroupMember -GroupId '${escapePS(groupId)}' -DirectoryObjectId (Get-MgUser -Filter "userPrincipalName eq '${escapePS(upn)}'").Id`,
-  );
+  try {
+    // Resolve user ID from UPN
+    const user = await graph.request<{ id: string }>(
+      `/users/${encodeURIComponent(upn)}`,
+      { params: { $select: "id" } },
+    );
 
-  if (error) {
+    // Add member via Graph REST API
+    await graph.post(`/groups/${groupId}/members/$ref`, {
+      "@odata.id": `https://graph.microsoft.com/v1.0/directoryObjects/${user.id}`,
+    });
+  } catch (e: any) {
     addSpin.stop("Failed to add member.");
-    p.log.error(error);
+    p.log.error(e.message);
     return null;
   }
 
   addSpin.stop(`Added ${upn} to ${groupName}.`);
-  return { name: groupName, email: group?.Mail ?? "" };
+  return { name: groupName, email: group?.mail ?? "" };
 }

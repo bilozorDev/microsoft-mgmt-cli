@@ -2,6 +2,7 @@ import * as p from "@clack/prompts";
 import type { PowerShellSession } from "../powershell.ts";
 import { friendlySkuName } from "../sku-names.ts";
 import { escapePS } from "../utils.ts";
+import { friendlyMfaMethod } from "../mfa-utils.ts";
 
 interface MgUser {
   DisplayName: string;
@@ -31,25 +32,21 @@ interface DirectoryRole {
   DisplayName: string;
 }
 
-interface AuthMethod {
-  ODataType: string | null;
+interface MailboxPermission {
+  User: string;
+  AccessRights: string | string[];
 }
 
-const MFA_METHOD_NAMES: Record<string, string> = {
-  microsoftAuthenticatorAuthenticationMethod: "Authenticator App",
-  phoneAuthenticationMethod: "Phone",
-  fido2AuthenticationMethod: "FIDO2 Security Key",
-  emailAuthenticationMethod: "Email",
-  softwareOathAuthenticationMethod: "Software Token",
-  windowsHelloForBusinessAuthenticationMethod: "Windows Hello",
-  temporaryAccessPassAuthenticationMethod: "Temporary Access Pass",
-  platformCredentialAuthenticationMethod: "Platform Credential",
-};
+interface RecipientPermission {
+  Trustee: string;
+}
 
-function friendlyMfaMethod(odataType: string): string | null {
-  const lastSegment = odataType.split(".").pop() ?? "";
-  if (lastSegment === "passwordAuthenticationMethod") return null;
-  return MFA_METHOD_NAMES[lastSegment] ?? lastSegment;
+interface UserInfoAuthMethod {
+  ODataType: string | null;
+  PhoneNumber: string | null;
+  PhoneType: string | null;
+  DisplayName: string | null;
+  DeviceTag: string | null;
 }
 
 async function fetchUsers(ps: PowerShellSession): Promise<MgUser[]> {
@@ -143,25 +140,48 @@ export async function run(ps: PowerShellSession): Promise<void> {
   // 3. Fetch all info sequentially (single PS stdout stream)
   spin.start("Fetching user details…");
 
-  // User details
-  const details = await ps.runCommandJson<UserDetails>(
-    [
-      `Get-MgUser -UserId '${escapePS(userId)}'`,
-      `-Property DisplayName,GivenName,Surname,UserPrincipalName,Mail,JobTitle,Department,AccountEnabled,CreatedDateTime,SignInActivity`,
-      `| ForEach-Object { [PSCustomObject]@{`,
-      `DisplayName = $_.DisplayName;`,
-      `GivenName = $_.GivenName;`,
-      `Surname = $_.Surname;`,
-      `UserPrincipalName = $_.UserPrincipalName;`,
-      `Mail = $_.Mail;`,
-      `JobTitle = $_.JobTitle;`,
-      `Department = $_.Department;`,
-      `AccountEnabled = $_.AccountEnabled;`,
-      `CreatedDateTime = if ($_.CreatedDateTime) { $_.CreatedDateTime.ToString('yyyy-MM-dd') } else { $null };`,
-      `LastSignInDateTime = if ($_.SignInActivity.LastSignInDateTime) { $_.SignInActivity.LastSignInDateTime.ToString('yyyy-MM-dd HH:mm') } else { $null }`,
-      `} }`,
-    ].join(" "),
-  );
+  // User details — try with SignInActivity first (requires AAD Premium), fall back without
+  let details: UserDetails | null = null;
+  try {
+    details = await ps.runCommandJson<UserDetails>(
+      [
+        `Get-MgUser -UserId '${escapePS(userId)}'`,
+        `-Property DisplayName,GivenName,Surname,UserPrincipalName,Mail,JobTitle,Department,AccountEnabled,CreatedDateTime,SignInActivity`,
+        `| ForEach-Object { [PSCustomObject]@{`,
+        `DisplayName = $_.DisplayName;`,
+        `GivenName = $_.GivenName;`,
+        `Surname = $_.Surname;`,
+        `UserPrincipalName = $_.UserPrincipalName;`,
+        `Mail = $_.Mail;`,
+        `JobTitle = $_.JobTitle;`,
+        `Department = $_.Department;`,
+        `AccountEnabled = $_.AccountEnabled;`,
+        `CreatedDateTime = if ($_.CreatedDateTime) { $_.CreatedDateTime.ToString('yyyy-MM-dd') } else { $null };`,
+        `LastSignInDateTime = if ($_.SignInActivity.LastSignInDateTime) { $_.SignInActivity.LastSignInDateTime.ToString('yyyy-MM-dd HH:mm') } else { $null }`,
+        `} }`,
+      ].join(" "),
+    );
+  } catch {
+    // SignInActivity requires AAD Premium — retry without it
+    details = await ps.runCommandJson<UserDetails>(
+      [
+        `Get-MgUser -UserId '${escapePS(userId)}'`,
+        `-Property DisplayName,GivenName,Surname,UserPrincipalName,Mail,JobTitle,Department,AccountEnabled,CreatedDateTime`,
+        `| ForEach-Object { [PSCustomObject]@{`,
+        `DisplayName = $_.DisplayName;`,
+        `GivenName = $_.GivenName;`,
+        `Surname = $_.Surname;`,
+        `UserPrincipalName = $_.UserPrincipalName;`,
+        `Mail = $_.Mail;`,
+        `JobTitle = $_.JobTitle;`,
+        `Department = $_.Department;`,
+        `AccountEnabled = $_.AccountEnabled;`,
+        `CreatedDateTime = if ($_.CreatedDateTime) { $_.CreatedDateTime.ToString('yyyy-MM-dd') } else { $null };`,
+        `LastSignInDateTime = $null`,
+        `} }`,
+      ].join(" "),
+    );
+  }
 
   // Licenses
   spin.message("Fetching licenses…");
@@ -195,20 +215,81 @@ export async function run(ps: PowerShellSession): Promise<void> {
   spin.message("Fetching 2FA methods…");
   let mfaMethods: string[] = [];
   try {
-    const methodsRaw = await ps.runCommandJson<AuthMethod | AuthMethod[]>(
+    const methodsRaw = await ps.runCommandJson<UserInfoAuthMethod | UserInfoAuthMethod[]>(
       [
         `Get-MgUserAuthenticationMethod -UserId '${escapePS(userId)}'`,
-        `| ForEach-Object { [PSCustomObject]@{ ODataType = $_.AdditionalProperties['@odata.type'] } }`,
+        `| ForEach-Object { [PSCustomObject]@{`,
+        `ODataType = $_.AdditionalProperties['@odata.type'];`,
+        `PhoneNumber = $_.AdditionalProperties['phoneNumber'];`,
+        `PhoneType = $_.AdditionalProperties['phoneType'];`,
+        `DisplayName = $_.AdditionalProperties['displayName'];`,
+        `DeviceTag = $_.AdditionalProperties['deviceTag']`,
+        `} }`,
       ].join(" "),
     );
     const methods = methodsRaw ? (Array.isArray(methodsRaw) ? methodsRaw : [methodsRaw]) : [];
     for (const m of methods) {
       if (!m.ODataType) continue;
       const name = friendlyMfaMethod(m.ODataType);
-      if (name) mfaMethods.push(name);
+      if (!name) continue;
+
+      // Add details where available
+      const details: string[] = [];
+      if (m.PhoneNumber) {
+        const typeLabel = m.PhoneType === "mobile" ? "mobile" : m.PhoneType === "alternateMobile" ? "alt mobile" : m.PhoneType ?? "";
+        details.push(typeLabel ? `${m.PhoneNumber} (${typeLabel})` : m.PhoneNumber);
+      }
+      if (m.DisplayName) details.push(m.DisplayName);
+      if (m.DeviceTag) details.push(m.DeviceTag);
+
+      mfaMethods.push(details.length > 0 ? `${name}: ${details.join(", ")}` : name);
     }
   } catch {
     mfaMethods = ["Error fetching"];
+  }
+
+  // Delegation: Full Access
+  spin.message("Fetching delegation settings…");
+  let fullAccessUsers: string[] = [];
+  let sendAsUsers: string[] = [];
+  let sendOnBehalfUsers: string[] = [];
+
+  try {
+    const raw = await ps.runCommandJson<MailboxPermission | MailboxPermission[]>(
+      `Get-MailboxPermission -Identity '${escapePS(selectedUser.UserPrincipalName)}' | Where-Object { $_.User -ne 'NT AUTHORITY\\SELF' -and $_.IsInherited -eq $false } | Select-Object User, AccessRights`,
+    );
+    const perms = raw ? (Array.isArray(raw) ? raw : [raw]) : [];
+    fullAccessUsers = perms
+      .filter((pm) => {
+        const rights = Array.isArray(pm.AccessRights) ? pm.AccessRights : [pm.AccessRights];
+        return rights.some((r) => r.includes("FullAccess"));
+      })
+      .map((pm) => pm.User);
+  } catch {
+    // No mailbox or error
+  }
+
+  // Delegation: Send As
+  try {
+    const raw = await ps.runCommandJson<RecipientPermission | RecipientPermission[]>(
+      `Get-RecipientPermission -Identity '${escapePS(selectedUser.UserPrincipalName)}' | Where-Object { $_.Trustee -ne 'NT AUTHORITY\\SELF' } | Select-Object Trustee`,
+    );
+    const perms = raw ? (Array.isArray(raw) ? raw : [raw]) : [];
+    sendAsUsers = perms.map((pm) => pm.Trustee);
+  } catch {
+    // No mailbox or error
+  }
+
+  // Delegation: Send on Behalf
+  try {
+    const { output, error } = await ps.runCommand(
+      `$mbx = Get-Mailbox -Identity '${escapePS(selectedUser.UserPrincipalName)}' -ErrorAction SilentlyContinue; if ($mbx -and $mbx.GrantSendOnBehalfTo.Count -gt 0) { ($mbx.GrantSendOnBehalfTo | ForEach-Object { (Get-Recipient $_ -ErrorAction SilentlyContinue).PrimarySmtpAddress }) -join ',' } else { '' }`,
+    );
+    if (!error && output.trim()) {
+      sendOnBehalfUsers = output.trim().split(",").filter(Boolean);
+    }
+  } catch {
+    // No mailbox or error
   }
 
   spin.stop("Done.");
@@ -275,6 +356,28 @@ export async function run(ps: PowerShellSession): Promise<void> {
   } else {
     for (const method of mfaMethods) {
       lines.push(`    - ${method}`);
+    }
+  }
+
+  lines.push("");
+
+  // Delegation
+  const hasDelegation = fullAccessUsers.length > 0 || sendAsUsers.length > 0 || sendOnBehalfUsers.length > 0;
+  lines.push("  Delegation:");
+  if (!hasDelegation) {
+    lines.push("    None");
+  } else {
+    if (fullAccessUsers.length > 0) {
+      lines.push(`    Full Access:`);
+      for (const u of fullAccessUsers) lines.push(`      - ${u}`);
+    }
+    if (sendAsUsers.length > 0) {
+      lines.push(`    Send As:`);
+      for (const u of sendAsUsers) lines.push(`      - ${u}`);
+    }
+    if (sendOnBehalfUsers.length > 0) {
+      lines.push(`    Send on Behalf:`);
+      for (const u of sendOnBehalfUsers) lines.push(`      - ${u}`);
     }
   }
 

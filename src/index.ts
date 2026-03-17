@@ -49,7 +49,9 @@ async function runCmd(name: string, fn: () => Promise<void>): Promise<void> {
 }
 
 async function cleanup() {
-  p.log.info("Disconnecting from Exchange Online...");
+  if (ps.isExchangeConnected) {
+    p.log.info("Disconnecting...");
+  }
   await ps.end();
   await shutdownAnalytics();
   await flushTelemetry();
@@ -83,30 +85,19 @@ async function main() {
     process.exit(1);
   }
 
-  // Connect to Exchange Online (opens browser for auth)
-  const authSpin = p.spinner();
-  authSpin.start("Connecting to Exchange Online (check your browser)...");
-  try {
-    await ps.connectExchangeOnline();
-    authSpin.stop("Connected to Exchange Online.");
-  } catch (e) {
-    authSpin.stop("Connection failed.");
-    p.log.error(`${e}`);
-    await ps.end();
-    process.exit(1);
-  }
-
-  // Extract tenant ID for Graph isolation
-  await ps.extractTenantId();
-
-  // Fetch tenant domain
-  try {
-    const domain = await ps.getTenantDomain();
+  // Set up callback for when tenant is resolved (on first Exchange connection)
+  ps.onTenantResolved = (domain) => {
     setTenantContext(domain);
     identifyTenant(domain);
     p.log.success(`Connected to: ${domain}`);
-  } catch {
-    p.log.warn("Could not determine tenant domain.");
+  };
+
+  // Connect to Exchange Online at startup (triggers tenant resolution callback)
+  try {
+    await ps.ensureExchangeConnected();
+  } catch (e) {
+    p.log.error(`Failed to connect to Exchange Online: ${e}`);
+    p.log.warn("Some commands may not work without an Exchange connection.");
   }
 
   // Main menu loop
@@ -119,7 +110,7 @@ async function main() {
         { value: "email-security", label: "Email Security" },
         { value: "reports", label: "Reports" },
         { value: "emergency-response", label: "Emergency Response", hint: "compromised account" },
-        { value: "switch-tenant", label: "Switch tenant", hint: ps.tenantDomain ? `connected to ${ps.tenantDomain}` : undefined },
+        { value: "switch-tenant", label: "Switch tenant", hint: ps.tenantDomain ? `connected to ${ps.tenantDomain}` : "connect to a tenant first", disabled: !ps.isExchangeConnected },
         { value: "exit", label: "Exit" },
       ],
     });
@@ -129,17 +120,11 @@ async function main() {
     }
 
     if (category === "switch-tenant") {
+      const oldDomain = ps.tenantDomain;
       const switchSpin = p.spinner();
       switchSpin.start("Disconnecting...");
-      try {
-        await ps.switchTenant();
-        switchSpin.stop(`Switched to: ${ps.tenantDomain}`);
-      } catch (e) {
-        switchSpin.stop("Failed to switch tenant.");
-        p.log.error(`${e}`);
-        await ps.end();
-        process.exit(1);
-      }
+      await ps.disconnectTenant();
+      switchSpin.stop(`Successfully disconnected from ${oldDomain}`);
       continue;
     }
 
@@ -147,9 +132,9 @@ async function main() {
       const action = await p.select({
         message: "User Management",
         options: [
-          { value: "create-user", label: "Create user", hint: "will prompt to login" },
-          { value: "edit-user", label: "Edit user", hint: "will prompt to login" },
-          { value: "delete-user", label: "Delete user", hint: "will prompt to login" },
+          { value: "create-user", label: "Create user" },
+          { value: "edit-user", label: "Edit user" },
+          { value: "delete-user", label: "Delete user" },
           { value: "user-info", label: "User info", hint: "roles, licenses, mailbox, 2FA" },
           { value: "back", label: "Back" },
         ],
@@ -178,7 +163,7 @@ async function main() {
         message: "Reports",
         options: [
           { value: "inactive-users", label: "Inactive users" },
-          { value: "shared-mailboxes", label: "Shared mailboxes", hint: "will prompt to login" },
+          { value: "shared-mailboxes", label: "Shared mailboxes" },
           { value: "forwarding-audit", label: "Forwarding audit", hint: "security & compliance" },
           { value: "admin-roles", label: "Admin role report", hint: "security audit" },
           { value: "users-report", label: "Licensed users report", hint: "licenses, MFA, mailbox size" },

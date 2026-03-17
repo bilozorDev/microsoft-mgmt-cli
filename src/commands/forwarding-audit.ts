@@ -103,6 +103,8 @@ function formatRuleTargets(rawTargets: string[], dnCache: Map<string, string>, s
 }
 
 export async function run(ps: PowerShellSession): Promise<void> {
+  await ps.ensureExchangeConnected();
+
   const spin = p.spinner();
 
   // Step 1: Fetch mailbox-level forwarding

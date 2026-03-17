@@ -917,6 +917,8 @@ async function editSharedMailbox(ps: PowerShellSession): Promise<void> {
 }
 
 export async function run(ps: PowerShellSession): Promise<void> {
+  await ps.ensureExchangeConnected();
+
   const type = await p.select({
     message: "What would you like to edit?",
     options: [
