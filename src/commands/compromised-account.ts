@@ -2,6 +2,7 @@ import { join } from "path";
 import { mkdirSync } from "fs";
 import * as p from "@clack/prompts";
 import type { PowerShellSession } from "../powershell.ts";
+import { GraphClient } from "../graph-client.ts";
 import { generatePassword } from "../password.ts";
 import { generateReport } from "../report-template.ts";
 import { escapePS, createSecretLink, appDir } from "../utils.ts";
@@ -60,14 +61,14 @@ interface TraceMessage {
 }
 
 interface SignInLog {
-  CreatedDateTime: string;
-  AppDisplayName: string;
-  ResourceDisplayName: string;
-  IpAddress: string;
-  Location: { City: string; CountryOrRegion: string } | null;
-  Status: { ErrorCode: number; FailureReason: string } | null;
-  IsInteractive: boolean;
-  ClientAppUsed: string;
+  createdDateTime: string;
+  appDisplayName: string;
+  resourceDisplayName: string;
+  ipAddress: string;
+  location: { city: string; countryOrRegion: string } | null;
+  status: { errorCode: number; failureReason: string } | null;
+  isInteractive: boolean;
+  clientAppUsed: string;
 }
 
 interface CompromisedAccountFindings {
@@ -914,13 +915,17 @@ export async function run(ps: PowerShellSession): Promise<void> {
 
         const sinceDate = new Date();
         sinceDate.setDate(sinceDate.getDate() - 7);
-        const isoDateZ = sinceDate.toISOString().replace(/\.\d{3}Z$/, "Z");
+        const isoDateZ = sinceDate.toISOString();
 
-        let raw: SignInLog | SignInLog[] | null = null;
+        const graph = new GraphClient(ps);
+        let logs: SignInLog[];
         try {
-          raw = await ps.runCommandJson<SignInLog | SignInLog[]>(
-            `Get-MgAuditLogSignIn -Filter "userId eq '${escapePS(userId)}' and createdDateTime ge ${isoDateZ}" -All | Select-Object CreatedDateTime,AppDisplayName,ResourceDisplayName,IpAddress,Location,Status,IsInteractive,ClientAppUsed`,
-          );
+          logs = await graph.getAll<SignInLog>("/auditLogs/signIns", {
+            params: {
+              $filter: `userId eq '${userId}' and createdDateTime ge ${isoDateZ}`,
+              $select: "createdDateTime,appDisplayName,resourceDisplayName,ipAddress,location,status,isInteractive,clientAppUsed",
+            },
+          });
         } catch (e) {
           spin.stop("Sign-in log query failed.");
           const msg = e instanceof Error ? e.message : String(e);
@@ -931,8 +936,6 @@ export async function run(ps: PowerShellSession): Promise<void> {
           }
           break;
         }
-
-        const logs = raw ? (Array.isArray(raw) ? raw : [raw]) : [];
         spin.message("Generating Excel report...");
 
         const tenant = ps.tenantDomain ?? "unknown";
@@ -961,16 +964,16 @@ export async function run(ps: PowerShellSession): Promise<void> {
             { header: "Client App", width: 22 },
           ],
           rows: logs.map((l) => [
-            (l.CreatedDateTime ?? "").slice(0, 19),
-            l.AppDisplayName ?? "",
-            l.ResourceDisplayName ?? "",
-            l.IpAddress ?? "",
-            l.Location?.City ?? "",
-            l.Location?.CountryOrRegion ?? "",
-            l.Status?.ErrorCode ?? "",
-            l.Status?.FailureReason ?? "",
-            l.IsInteractive ? "Yes" : "No",
-            l.ClientAppUsed ?? "",
+            (l.createdDateTime ?? "").slice(0, 19),
+            l.appDisplayName ?? "",
+            l.resourceDisplayName ?? "",
+            l.ipAddress ?? "",
+            l.location?.city ?? "",
+            l.location?.countryOrRegion ?? "",
+            l.status?.errorCode ?? "",
+            l.status?.failureReason ?? "",
+            l.isInteractive ? "Yes" : "No",
+            l.clientAppUsed ?? "",
           ]),
         });
         await Bun.write(signInPath, signInBuffer);
