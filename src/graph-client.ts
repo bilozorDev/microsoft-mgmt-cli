@@ -100,8 +100,16 @@ export class GraphClient {
         res.headers.get("Retry-After") ?? "5",
         10,
       );
-      await Bun.sleep(retryAfter * 1000);
+      await Bun.sleep((Number.isFinite(retryAfter) ? retryAfter : 5) * 1000);
+      // Refresh token in case it expired during the wait
+      token = await this.ensureToken();
       res = await doRequest(token);
+      // Handle 401 after throttle retry (token may have expired during wait)
+      if (res.status === 401) {
+        this.invalidateToken();
+        token = await this.ensureToken();
+        res = await doRequest(token);
+      }
     }
 
     if (!res.ok) {

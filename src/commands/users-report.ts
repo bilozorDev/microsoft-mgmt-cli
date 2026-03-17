@@ -79,8 +79,6 @@ function getUserLicenses(
 }
 
 export async function run(ps: PowerShellSession): Promise<void> {
-  await ps.ensureExchangeConnected();
-
   // 1. Connect to Graph
   const spin = p.spinner();
   spin.start("Connecting to Microsoft Graph…");
@@ -185,6 +183,14 @@ export async function run(ps: PowerShellSession): Promise<void> {
   // 5. Mailbox Size (per-user)
   const mailboxMap = new Map<string, string>(); // upn → size string
   if (includeMailbox) {
+    try {
+      await ps.ensureExchangeConnected();
+    } catch (e: any) {
+      p.log.error("Mailbox Size requires Exchange Online connection.");
+      p.log.error(e?.message ?? String(e));
+      return;
+    }
+
     spin.start(`Fetching mailbox sizes (0/${users.length})…`);
     const stopMbTimer = elapsedTimer(spin, "Fetching mailbox sizes");
 

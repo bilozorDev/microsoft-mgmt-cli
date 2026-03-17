@@ -155,7 +155,21 @@ export class PowerShellSession {
   }
 
   async ensureExchangeConnected(): Promise<void> {
-    if (this.exchangeConnected) return;
+    if (this.exchangeConnected) {
+      // Retry tenant metadata if it failed on first connect
+      if (!this.tenantDomain) {
+        try {
+          if (!this.tenantId) await this.extractTenantId();
+          await this.getTenantDomain();
+          if (this.tenantDomain) {
+            this.onTenantResolved?.(this.tenantDomain);
+          }
+        } catch {
+          // Best-effort metadata retry
+        }
+      }
+      return;
+    }
 
     await this.connectExchangeOnline();
     await this.extractTenantId();
@@ -173,9 +187,9 @@ export class PowerShellSession {
     const missing = requiredScopes.filter((s) => !this.isScopeCovered(s));
     if (missing.length === 0) return;
 
-    // Ensure Exchange is connected first so we have tenantId for Graph scoping
-    if (!this.tenantId) {
-      await this.ensureExchangeConnected();
+    // Try to get tenantId from Exchange if connected, but don't force Exchange connection
+    if (!this.tenantId && this.exchangeConnected) {
+      await this.extractTenantId();
     }
 
     if (this.grantedScopes.size > 0) {

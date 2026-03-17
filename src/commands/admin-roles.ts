@@ -25,6 +25,7 @@ interface AdminUserDetails {
   createdDateTime: string | null;
   signInActivity?: {
     lastSuccessfulSignInDateTime: string | null;
+    lastSignInDateTime: string | null;
   };
 }
 
@@ -85,11 +86,19 @@ export async function run(ps: PowerShellSession): Promise<void> {
 
   const graph = new GraphClient(ps);
 
-  const roles = await graph.getAll<DirectoryRole>("/directoryRoles", {
-    params: { $select: "id,displayName" },
-  });
+  let roles: DirectoryRole[];
+  try {
+    roles = await graph.getAll<DirectoryRole>("/directoryRoles", {
+      params: { $select: "id,displayName" },
+    });
+  } catch (e: any) {
+    spin.stop("Failed to fetch directory roles.");
+    p.log.error(e.message ?? String(e));
+    return;
+  } finally {
+    stopTimer();
+  }
 
-  stopTimer();
   spin.stop(`Found ${roles.length} activated role(s).`);
 
   if (roles.length === 0) {
@@ -171,7 +180,9 @@ export async function run(ps: PowerShellSession): Promise<void> {
           admin.accountEnabled = detail.accountEnabled;
           admin.createdDateTime = detail.createdDateTime;
           admin.lastSignIn =
-            detail.signInActivity?.lastSuccessfulSignInDateTime ?? null;
+            detail.signInActivity?.lastSuccessfulSignInDateTime ??
+            detail.signInActivity?.lastSignInDateTime ??
+            null;
         } catch {
           // Keep defaults if user lookup fails
         }

@@ -553,8 +553,6 @@ async function createSharedMailbox(ps: PowerShellSession): Promise<void> {
 }
 
 export async function run(ps: PowerShellSession): Promise<void> {
-  await ps.ensureExchangeConnected();
-
   const type = await p.select({
     message: "What would you like to create?",
     options: [
@@ -567,12 +565,14 @@ export async function run(ps: PowerShellSession): Promise<void> {
 
   switch (type) {
     case "distribution":
+      await ps.ensureExchangeConnected();
       await createDistributionGroup(ps);
       break;
     case "security":
       await createSecurityGroup(ps);
       break;
     case "shared-mailbox":
+      await ps.ensureExchangeConnected();
       await createSharedMailbox(ps);
       break;
   }

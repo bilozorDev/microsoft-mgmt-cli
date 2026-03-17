@@ -123,14 +123,22 @@ export async function run(ps: PowerShellSession): Promise<void> {
 
   const graph = new GraphClient(ps);
 
-  const rawUsers = await graph.getAll<GraphUser>("/users", {
-    params: {
-      $select:
-        "userPrincipalName,displayName,signInActivity,accountEnabled,createdDateTime,userType,assignedLicenses",
-      $top: "999",
-    },
-  });
-  stopTimer();
+  let rawUsers: GraphUser[];
+  try {
+    rawUsers = await graph.getAll<GraphUser>("/users", {
+      params: {
+        $select:
+          "userPrincipalName,displayName,signInActivity,accountEnabled,createdDateTime,userType,assignedLicenses",
+        $top: "999",
+      },
+    });
+  } catch (e: any) {
+    spin.stop("Failed to fetch users.");
+    p.log.error(e.message ?? String(e));
+    return;
+  } finally {
+    stopTimer();
+  }
 
   // Map nested Graph response to flat shape used by downstream code
   const allUsers: FlatUser[] = rawUsers.map((u) => ({

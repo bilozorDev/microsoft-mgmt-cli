@@ -284,7 +284,7 @@ export async function run(ps: PowerShellSession): Promise<void> {
           if (detailFetcher) {
             try {
               const raw = await ps.runCommandJson<Record<string, unknown>>(
-                detailFetcher.cmd(escapePS(userId), escapePS(m.Id)),
+                detailFetcher.cmd(userId, m.Id),
               );
               if (raw) detail = detailFetcher.format(raw);
             } catch {
@@ -665,9 +665,9 @@ export async function run(ps: PowerShellSession): Promise<void> {
 
         // Sessions
         if (findings.sessionsRevoked) {
-          lines.push("[x] Signed out of all sessions and revoked 2FA sessions");
+          lines.push("[x] Signed out of all sessions");
         } else {
-          lines.push("[ ] Sign out of all sessions and revoke 2FA sessions: Not done");
+          lines.push("[ ] Sign out of all sessions: Not done");
         }
 
         // MFA

@@ -641,7 +641,7 @@ export async function run(ps: PowerShellSession): Promise<void> {
           if (detailFetcher) {
             try {
               const detailRaw = await ps.runCommandJson<Record<string, unknown>>(
-                detailFetcher.cmd(escapePS(userId), escapePS(m.Id)),
+                detailFetcher.cmd(userId, m.Id),
               );
               if (detailRaw) detail = detailFetcher.format(detailRaw);
             } catch {
@@ -720,6 +720,7 @@ export async function run(ps: PowerShellSession): Promise<void> {
 
           const delegSpin = p.spinner();
           delegSpin.start("Adding delegation...");
+          const addedCount = delegationsAdded.length;
 
           for (const perm of permTypes) {
             delegSpin.message(`Adding ${perm}...`);
@@ -744,9 +745,10 @@ export async function run(ps: PowerShellSession): Promise<void> {
             }
           }
 
+          const newlyAdded = delegationsAdded.length - addedCount;
           delegSpin.stop(
-            delegationsAdded.length > 0
-              ? `Added ${delegationsAdded.length} delegation(s).`
+            newlyAdded > 0
+              ? `Added ${newlyAdded} delegation(s).`
               : "No delegations added.",
           );
         } else {
@@ -763,6 +765,10 @@ export async function run(ps: PowerShellSession): Promise<void> {
             );
             const fa = faRaw ? (Array.isArray(faRaw) ? faRaw : [faRaw]) : [];
             for (const perm of fa) {
+              const rights = Array.isArray(perm.AccessRights)
+                ? perm.AccessRights
+                : [String(perm.AccessRights)];
+              if (!rights.some((r) => r.includes("FullAccess"))) continue;
               allDelegations.push({
                 value: `FullAccess:${perm.User}`,
                 label: perm.User,

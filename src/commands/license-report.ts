@@ -78,22 +78,31 @@ export async function run(ps: PowerShellSession): Promise<void> {
 
   const graph = new GraphClient(ps);
 
-  const skuList = await graph.getAll<SubscribedSku>("/subscribedSkus", {
-    params: { $select: "skuId,skuPartNumber,consumedUnits,prepaidUnits" },
-  });
-  const skuMap = new Map(skuList.map((s) => [s.skuId, s]));
+  let skuList: SubscribedSku[];
+  let subscriptions: Subscription[];
+  try {
+    skuList = await graph.getAll<SubscribedSku>("/subscribedSkus", {
+      params: { $select: "skuId,skuPartNumber,consumedUnits,prepaidUnits" },
+    });
 
-  const subscriptions = await graph.getAll<Subscription>(
-    "/directory/subscriptions",
-    {
-      params: {
-        $select:
-          "id,skuId,skuPartNumber,totalLicenses,status,isTrial,createdDateTime,nextLifecycleDateTime",
+    subscriptions = await graph.getAll<Subscription>(
+      "/directory/subscriptions",
+      {
+        params: {
+          $select:
+            "id,skuId,skuPartNumber,totalLicenses,status,isTrial,createdDateTime,nextLifecycleDateTime",
+        },
       },
-    },
-  );
+    );
+  } catch (e: any) {
+    spin.stop("Failed to fetch license and subscription data.");
+    p.log.error(e.message ?? String(e));
+    return;
+  } finally {
+    stopTimer();
+  }
 
-  stopTimer();
+  const skuMap = new Map(skuList.map((s) => [s.skuId, s]));
   spin.stop(`Found ${subscriptions.length} subscription(s) across ${skuList.length} SKU(s).`);
 
   if (subscriptions.length === 0) {

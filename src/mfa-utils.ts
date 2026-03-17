@@ -14,26 +14,29 @@ export const MFA_METHOD_NAMES: Record<string, string> = {
   platformCredentialAuthenticationMethod: "Platform Credential",
 };
 
-/** Per-type detail fetchers — each returns a human-readable detail string. */
+const esc = (v: string): string => v.replace(/'/g, "''");
+
+/** Per-type detail fetchers — each returns a human-readable detail string.
+ *  uid and mid are escaped internally; callers should pass raw values. */
 export const MFA_DETAIL_CMDS: Record<string, { cmd: (uid: string, mid: string) => string; format: (raw: Record<string, unknown>) => string }> = {
   microsoftAuthenticatorAuthenticationMethod: {
     cmd: (uid, mid) =>
-      `Get-MgUserAuthenticationMicrosoftAuthenticatorMethod -UserId '${uid}' -MicrosoftAuthenticatorAuthenticationMethodId '${mid}' | Select-Object DisplayName,DeviceTag,PhoneAppVersion,CreatedDateTime`,
+      `Get-MgUserAuthenticationMicrosoftAuthenticatorMethod -UserId '${esc(uid)}' -MicrosoftAuthenticatorAuthenticationMethodId '${esc(mid)}' | Select-Object DisplayName,DeviceTag,PhoneAppVersion,CreatedDateTime`,
     format: (r) => [r.DisplayName, r.DeviceTag, r.PhoneAppVersion ? `v${r.PhoneAppVersion}` : null].filter(Boolean).join(", "),
   },
   phoneAuthenticationMethod: {
     cmd: (uid, mid) =>
-      `Get-MgUserAuthenticationPhoneMethod -UserId '${uid}' -PhoneAuthenticationMethodId '${mid}' | Select-Object PhoneNumber,PhoneType`,
+      `Get-MgUserAuthenticationPhoneMethod -UserId '${esc(uid)}' -PhoneAuthenticationMethodId '${esc(mid)}' | Select-Object PhoneNumber,PhoneType`,
     format: (r) => [r.PhoneNumber, r.PhoneType].filter(Boolean).join(" "),
   },
   fido2AuthenticationMethod: {
     cmd: (uid, mid) =>
-      `Get-MgUserAuthenticationFido2Method -UserId '${uid}' -Fido2AuthenticationMethodId '${mid}' | Select-Object DisplayName,Model,CreatedDateTime`,
+      `Get-MgUserAuthenticationFido2Method -UserId '${esc(uid)}' -Fido2AuthenticationMethodId '${esc(mid)}' | Select-Object DisplayName,Model,CreatedDateTime`,
     format: (r) => [r.DisplayName, r.Model].filter(Boolean).join(", "),
   },
   emailAuthenticationMethod: {
     cmd: (uid, mid) =>
-      `Get-MgUserAuthenticationEmailMethod -UserId '${uid}' -EmailAuthenticationMethodId '${mid}' | Select-Object EmailAddress`,
+      `Get-MgUserAuthenticationEmailMethod -UserId '${esc(uid)}' -EmailAuthenticationMethodId '${esc(mid)}' | Select-Object EmailAddress`,
     format: (r) => String(r.EmailAddress ?? ""),
   },
 };

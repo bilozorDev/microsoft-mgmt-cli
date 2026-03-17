@@ -92,6 +92,14 @@ async function main() {
     p.log.success(`Connected to: ${domain}`);
   };
 
+  // Connect to Exchange Online at startup (triggers tenant resolution callback)
+  try {
+    await ps.ensureExchangeConnected();
+  } catch (e) {
+    p.log.error(`Failed to connect to Exchange Online: ${e}`);
+    p.log.warn("Some commands may not work without an Exchange connection.");
+  }
+
   // Main menu loop
   while (true) {
     const category = await p.select({
