@@ -103,7 +103,7 @@ async function fetchUsers(ps: PowerShellSession): Promise<MgUser[]> {
 }
 
 export async function run(ps: PowerShellSession): Promise<void> {
-  // 1. Connect to Graph
+  // 1. Connect to Graph + Exchange
   const spin = p.spinner();
   spin.start("Connecting to Microsoft Graph…");
   try {
@@ -120,6 +120,17 @@ export async function run(ps: PowerShellSession): Promise<void> {
     return;
   }
   spin.stop("Connected to Microsoft Graph.");
+
+  const exoSpin = p.spinner();
+  exoSpin.start("Connecting to Exchange Online (check your browser)...");
+  try {
+    await ps.ensureExchangeConnected();
+    exoSpin.stop("Connected to Exchange Online.");
+  } catch (e) {
+    exoSpin.stop("Failed to connect to Exchange Online.");
+    p.log.error(`${e}`);
+    return;
+  }
 
   // 2. Pick a user
   const users = await fetchUsers(ps);
