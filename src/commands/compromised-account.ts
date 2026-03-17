@@ -200,7 +200,16 @@ export async function run(ps: PowerShellSession): Promise<void> {
     return;
   }
 
-  await ps.ensureExchangeConnected();
+  const exoSpin = p.spinner();
+  exoSpin.start("Connecting to Exchange Online (check your browser)...");
+  try {
+    await ps.ensureExchangeConnected();
+    exoSpin.stop("Connected to Exchange Online.");
+  } catch (e) {
+    exoSpin.stop("Failed to connect to Exchange Online.");
+    p.log.error(`${e}`);
+    return;
+  }
 
   // Select compromised user
   const user = await selectUser(ps);
@@ -755,6 +764,7 @@ export async function run(ps: PowerShellSession): Promise<void> {
         const removeSpin = p.spinner();
         removeSpin.start("Removing selected permissions...");
         const failures: string[] = [];
+        let removedCount = 0;
         for (const key of toRemove) {
           const parts = key.split("::");
           const delegate = parts[0]!;
@@ -782,8 +792,9 @@ export async function run(ps: PowerShellSession): Promise<void> {
           }
 
           findings.permissionsRemoved.push(`${delegate} (${permType})`);
+          removedCount++;
         }
-        removeSpin.stop(`Removed ${findings.permissionsRemoved.length} permission(s).`);
+        removeSpin.stop(`Removed ${removedCount} permission(s).`);
         for (const f of failures) p.log.error(f);
         break;
       }
